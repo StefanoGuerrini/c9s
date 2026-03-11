@@ -9,7 +9,7 @@ Terminal dashboard for Claude Code -- like k9s, but for your AI sessions.
 
 ## Why c9s?
 
-I tried [agent-deck](https://github.com/asheshgoplani/agent-deck), [ntm](https://github.com/Dicklesworthstone/ntm), and other tools for managing Claude Code sessions, but they felt overcomplicated for what I needed. I wanted something like [k9s](https://k9scli.io/) -- simple, keyboard-driven, zero setup. Launch one command, see all your sessions, open or resume any of them. That's it.
+I tried [agent-deck](https://github.com/asheshgoplani/agent-deck), [ntm](https://github.com/Dicklesworthstone/ntm), and other tools for managing Claude Code sessions. They're powerful, but way more complex than what my workflow needed. I wanted something like [k9s](https://k9scli.io/) -- simple, keyboard-driven, zero setup. Launch one command, see all your sessions, open or resume any of them. That's it.
 
 c9s reads directly from `~/.claude/`. No API calls, no network, no daemon. One binary + tmux.
 
@@ -161,7 +161,7 @@ Process detection uses `ps` + `lsof` to find running Claude processes and match 
 ## Related projects
 
 - [agent-deck](https://github.com/asheshgoplani/agent-deck) -- a more feature-rich multi-agent dashboard
-- [ntm](https://github.com/Dicklesworthstone/ntm) -- neural task manager for Claude Code
+- [ntm](https://github.com/Dicklesworthstone/ntm) -- tmux session manager for orchestrating multiple AI coding agents in parallel
 
 ## License
 
