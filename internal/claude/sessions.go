@@ -122,21 +122,29 @@ func (s SessionInfo) DisplayName() string {
 	return s.SessionID
 }
 
+// claudeDir returns the Claude config directory.
+// Respects CLAUDE_CONFIG_DIR if set, otherwise defaults to ~/.claude.
+func claudeDir() string {
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return dir
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude")
+}
+
 // ProjectDir returns the Claude project directory for a given project path.
 // Claude encodes paths by replacing separators with dashes and prepending a dash.
 // Example: /Users/foo/bar → ~/.claude/projects/-Users-foo-bar
 func ProjectDir(projectPath string) string {
-	home, _ := os.UserHomeDir()
 	encoded := "-" + strings.ReplaceAll(strings.TrimPrefix(projectPath, "/"), "/", "-")
-	return filepath.Join(home, ".claude", "projects", encoded)
+	return filepath.Join(claudeDir(), "projects", encoded)
 }
 
 // ListAllSessions returns all Claude sessions discovered from
 // ~/.claude/history.jsonl, enriched with metadata from sessions-index.json
 // files where available. Sorted by modified time (newest first).
 func ListAllSessions() ([]SessionInfo, error) {
-	home, _ := os.UserHomeDir()
-	historyPath := filepath.Join(home, ".claude", "history.jsonl")
+	historyPath := filepath.Join(claudeDir(), "history.jsonl")
 	return listAllSessionsFrom(historyPath)
 }
 
