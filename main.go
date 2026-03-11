@@ -179,6 +179,7 @@ func initialModel(sessions []claude.SessionInfo, err error, insideTmux bool) mod
 
 func (m model) Init() tea.Cmd {
 	var cmds []tea.Cmd
+	cmds = append(cmds, tea.ClearScreen)
 	cmds = append(cmds, tea.Tick(refreshInterval(), func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	}))
@@ -647,7 +648,7 @@ func (m model) saveConfig() (tea.Model, tea.Cmd) {
 			tmux.CleanupNavigationKeys(oldKeys)
 			tmux.SetupNavigationKeys(newKeys)
 		}
-		tmux.ConfigureStatusBar(newKeys, statusColors(), version)
+		tmux.ConfigureStatusBar(newKeys, statusColors(), version, cfg.ScrollSpeed)
 	}
 
 	m.configScreen = false
@@ -1609,7 +1610,7 @@ func main() {
 			}
 			return
 		}
-		if err := tmux.Bootstrap(selfBin, args, navKeys(), statusColors(), version); err != nil {
+		if err := tmux.Bootstrap(selfBin, args, navKeys(), statusColors(), version, cfg.ScrollSpeed); err != nil {
 			fmt.Fprintf(os.Stderr, "tmux bootstrap: %v\n", err)
 			os.Exit(1)
 		}

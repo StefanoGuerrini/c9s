@@ -14,6 +14,7 @@ import (
 type Config struct {
 	Theme          string `json:"theme"`            // "default" or "custom"
 	RefreshSeconds int    `json:"refresh_seconds"`  // dashboard refresh interval (default: 3)
+	ScrollSpeed    int    `json:"scroll_speed"`     // lines per mouse scroll event (default: 3)
 	Keys           Keys   `json:"keys"`
 	Colors         Colors `json:"colors"`
 }
@@ -68,6 +69,7 @@ func Default() Config {
 	return Config{
 		Theme:          "default",
 		RefreshSeconds: 3,
+		ScrollSpeed:    3,
 		Keys: Keys{
 			Dashboard:   "C-d",
 			NextSession: "C-n",
@@ -134,6 +136,14 @@ func EditableFields() []Field {
 				n, err := strconv.Atoi(v)
 				if err == nil && n >= 1 && n <= 10 {
 					c.RefreshSeconds = n
+				}
+			}},
+		{Section: "General", Label: "Scroll speed", Key: "scroll_speed",
+			Get: func(c Config) string { return fmt.Sprintf("%d", c.ScrollSpeed) },
+			Set: func(c *Config, v string) {
+				n, err := strconv.Atoi(v)
+				if err == nil && n >= 1 && n <= 10 {
+					c.ScrollSpeed = n
 				}
 			}},
 		// Shortcuts

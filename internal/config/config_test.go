@@ -56,19 +56,24 @@ func TestEditableFields(t *testing.T) {
 		t.Errorf("field[0].Section = %q, want General", fields[0].Section)
 	}
 
+	// Second field should be scroll speed (General section).
+	if fields[1].Key != "scroll_speed" {
+		t.Errorf("field[1].Key = %q, want scroll_speed", fields[1].Key)
+	}
+
 	// Next 3 should be shortcuts.
 	for i, key := range []string{"dashboard", "next_session", "prev_session"} {
-		if fields[i+1].Key != key {
-			t.Errorf("field[%d].Key = %q, want %q", i+1, fields[i+1].Key, key)
+		if fields[i+2].Key != key {
+			t.Errorf("field[%d].Key = %q, want %q", i+2, fields[i+2].Key, key)
 		}
-		if fields[i+1].Section != "Shortcuts" {
-			t.Errorf("field[%d].Section = %q, want Shortcuts", i+1, fields[i+1].Section)
+		if fields[i+2].Section != "Shortcuts" {
+			t.Errorf("field[%d].Section = %q, want Shortcuts", i+2, fields[i+2].Section)
 		}
 	}
 
-	// 5th should be theme toggle.
-	if fields[4].Key != "theme" {
-		t.Errorf("field[4].Key = %q, want theme", fields[4].Key)
+	// 6th should be theme toggle.
+	if fields[5].Key != "theme" {
+		t.Errorf("field[5].Key = %q, want theme", fields[5].Key)
 	}
 
 	// Test Get/Set roundtrip on refresh field.

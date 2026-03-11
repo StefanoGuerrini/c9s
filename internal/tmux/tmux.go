@@ -43,7 +43,7 @@ func SessionExists() bool {
 // Bootstrap creates the c9s tmux session and attaches to it, re-executing
 // the given binary with --inside-tmux inside the session. This replaces the
 // current process (exec) on success.
-func Bootstrap(selfBin string, args []string, keys NavKeys, colors StatusColors, version string) error {
+func Bootstrap(selfBin string, args []string, keys NavKeys, colors StatusColors, version string, scrollSpeed int) error {
 	// Create new tmux session with dashboard window running c9s --inside-tmux.
 	cmdArgs := append([]string{selfBin, "--inside-tmux"}, args...)
 	cmd := strings.Join(cmdArgs, " ")
@@ -58,7 +58,7 @@ func Bootstrap(selfBin string, args []string, keys NavKeys, colors StatusColors,
 	}
 
 	// Customize the status bar for c9s.
-	ConfigureStatusBar(keys, colors, version)
+	ConfigureStatusBar(keys, colors, version, scrollSpeed)
 
 	// Attach to the session (this takes over the terminal).
 	return Attach()
@@ -287,7 +287,8 @@ func keyDisplayName(tmuxKey string) string {
 }
 
 // ConfigureStatusBar customizes the tmux status bar and prefix for the c9s session.
-func ConfigureStatusBar(keys NavKeys, colors StatusColors, version string) {
+// scrollSpeed controls lines per mouse wheel event (0 or negative = tmux default).
+func ConfigureStatusBar(keys NavKeys, colors StatusColors, version string, scrollSpeed int) {
 	t := func(option, value string) {
 		exec.Command("tmux", "set-option", "-t", SessionName, option, value).Run()
 	}
@@ -296,6 +297,29 @@ func ConfigureStatusBar(keys NavKeys, colors StatusColors, version string) {
 	// interfere with the user's own tmux bindings or terminal shortcuts.
 	t("prefix", "None")
 	t("prefix2", "None")
+
+	// Enable mouse support so users can scroll through Claude session
+	// history with the mouse wheel / trackpad.
+	// Hold Shift (or Option in iTerm2) to select text for copying.
+	t("mouse", "on")
+
+	// Configure scroll speed (lines per wheel event).
+	if scrollSpeed > 0 {
+		// Build tmux bind-key args that chain N scroll commands with ";" separators.
+		// tmux expects: bind-key -T copy-mode WheelUpPane send-keys -X scroll-up \; send-keys -X scroll-up ...
+		buildArgs := func(table, key, scrollDir string) []string {
+			args := []string{"bind-key", "-T", table, key}
+			for i := 0; i < scrollSpeed; i++ {
+				if i > 0 {
+					args = append(args, ";")
+				}
+				args = append(args, "send-keys", "-X", scrollDir)
+			}
+			return args
+		}
+		exec.Command("tmux", buildArgs("copy-mode", "WheelUpPane", "scroll-up")...).Run()
+		exec.Command("tmux", buildArgs("copy-mode", "WheelDownPane", "scroll-down")...).Run()
+	}
 
 	// Enable extended keys so modifiers like Ctrl+Enter pass through
 	// correctly to applications (e.g., Claude Code uses Ctrl+Enter for newline).
