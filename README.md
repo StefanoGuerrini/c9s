@@ -2,6 +2,7 @@
 
 Terminal dashboard for Claude Code -- like k9s, but for your AI sessions.
 
+![Tests](https://github.com/StefanoGuerrini/c9s/actions/workflows/test.yml/badge.svg)
 ![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
