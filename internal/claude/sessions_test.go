@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testIndex(version int, entries ...rawEntry) rawIndex {
@@ -519,12 +520,13 @@ func TestRefreshBackups(t *testing.T) {
 	bkFile := filepath.Join(bkDir, sessionID+".jsonl")
 	metaFile := filepath.Join(bkDir, sessionID+".meta")
 
-	// Create source and backup with old content.
-	os.WriteFile(srcFile, []byte("old"), 0644)
+	// Create backup with old content and an old mtime.
 	os.WriteFile(bkFile, []byte("old"), 0644)
 	os.WriteFile(metaFile, []byte(srcDir), 0644)
+	past := time.Now().Add(-10 * time.Second)
+	os.Chtimes(bkFile, past, past)
 
-	// Update source with new content and ensure mtime is newer.
+	// Create source with new content (mtime = now, newer than backup).
 	os.WriteFile(srcFile, []byte("new content"), 0644)
 
 	RefreshBackups()
