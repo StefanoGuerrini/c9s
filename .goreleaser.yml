@@ -1,0 +1,54 @@
+version: 2
+
+builds:
+  - binary: c9s
+    main: .
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version=v{{.Version}}
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+
+brews:
+  - repository:
+      owner: stefanoguerrini
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    name: c9s
+    homepage: "https://github.com/stefanoguerrini/c9s"
+    description: "Terminal dashboard for Claude Code sessions"
+    license: "MIT"
+    dependencies:
+      - name: tmux
+    install: |
+      bin.install "c9s"
+    test: |
+      system "#{bin}/c9s", "--version"
