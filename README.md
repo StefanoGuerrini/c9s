@@ -8,6 +8,8 @@ Terminal dashboard for Claude Code -- like k9s, but for your AI sessions.
 
 ![c9s dashboard](docs/dashboard.png)
 
+> **Beta** -- c9s is in early development and still needs validation. Feel free to use it! It reads local files only -- it never accesses your Claude account, never stores credentials, and adds zero cost to your Claude usage.
+
 ## Why c9s?
 
 I tried [agent-deck](https://github.com/asheshgoplani/agent-deck), [ntm](https://github.com/Dicklesworthstone/ntm), and other tools for managing Claude Code sessions. They're powerful, but way more complex than what my workflow needed. I wanted something like [k9s](https://k9scli.io/) -- simple, keyboard-driven, zero setup. Launch one command, see all your sessions, open or resume any of them. That's it.
