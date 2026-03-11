@@ -197,7 +197,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		if !m.demoMode {
 			sessions, err := claude.ListAllSessions()
-			if err == nil {
+			if err == nil && sessionsChanged(m.sessions, sessions) {
 				m.sessions = sessions
 			}
 			// Reload config if changed on disk (e.g. after editing via 'c').
@@ -1523,6 +1523,23 @@ func navKeys() tmux.NavKeys {
 		NextSession: cfg.Keys.NextSession,
 		PrevSession: cfg.Keys.PrevSession,
 	}
+}
+
+// sessionsChanged returns true if the session list has meaningfully changed.
+// Compares count, IDs, statuses, token counts, and mtimes to avoid unnecessary re-renders.
+func sessionsChanged(old, new []claude.SessionInfo) bool {
+	if len(old) != len(new) {
+		return true
+	}
+	for i := range old {
+		a, b := old[i], new[i]
+		if a.SessionID != b.SessionID || a.Status != b.Status ||
+			a.InputTokens != b.InputTokens || a.OutputTokens != b.OutputTokens ||
+			a.CustomTitle != b.CustomTitle || !a.FileMtime.Equal(b.FileMtime) {
+			return true
+		}
+	}
+	return false
 }
 
 func refreshInterval() time.Duration {
