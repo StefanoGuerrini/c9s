@@ -1,6 +1,23 @@
 package claude
 
-import "time"
+import (
+	"time"
+
+	"github.com/stefanoguerrini/c9s/internal/git"
+)
+
+// DemoWorktrees provides fake worktree data keyed by project path for demo mode.
+var DemoWorktrees = map[string][]git.Worktree{
+	"~/Projects/webapp": {
+		{Path: "~/Projects/webapp", Branch: "main", IsMain: true},
+		{Path: "~/Projects/webapp-feat-auth", Branch: "feat/jwt-auth", IsMain: false},
+		{Path: "~/Projects/webapp-dark-mode", Branch: "feat/dark-mode", IsMain: false},
+	},
+	"~/Projects/realtime-api": {
+		{Path: "~/Projects/realtime-api", Branch: "main", IsMain: true},
+		{Path: "~/Projects/realtime-api-ws-fix", Branch: "fix/ws-keepalive", IsMain: false},
+	},
+}
 
 // DemoSessions returns a set of fake sessions for screenshot/demo purposes.
 func DemoSessions() []SessionInfo {

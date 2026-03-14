@@ -44,6 +44,9 @@ c9s/
 │   ├── config/
 │   │   ├── config.go                # Config loading from ~/.c9s/config.json
 │   │   └── config_test.go           # Tests
+│   ├── git/
+│   │   ├── worktree.go              # Git worktree discovery + creation
+│   │   └── worktree_test.go         # Tests
 │   └── tmux/
 │       ├── tmux.go                  # tmux CLI wrapper, pane status, status bar
 │       ├── tmux_test.go             # Tests
@@ -110,10 +113,11 @@ q on dashboard   → kills entire c9s tmux session
 
 | Package | Responsibility | Dependencies |
 |---------|---------------|-------------|
-| `claude` | Session discovery, tokens, process detection | None |
+| `claude` | Session discovery, tokens, process detection | `git` (demo only) |
 | `config` | Config loading from `~/.c9s/config.json` | None |
+| `git` | Git worktree discovery + creation | None |
 | `tmux` | tmux CLI wrapper, pane status, status bar | None |
-| `main` | Bubbletea TUI, tmux bootstrap, keybindings | `claude`, `config`, `tmux` |
+| `main` | Bubbletea TUI, tmux bootstrap, keybindings | `claude`, `config`, `git`, `tmux` |
 
 ## Keybindings
 
@@ -129,6 +133,7 @@ q on dashboard   → kills entire c9s tmux session
 | `Tab` | Cycle grouping: none → project → status |
 | `p` | Toggle session preview panel |
 | `t` | Toggle token column |
+| `w` | Toggle worktree sub-rows + branch column (when worktrees enabled) |
 | `r` | Cycle refresh interval (1s/2s/3s/5s) |
 | `q` / `Ctrl+c` | Quit |
 | `Ctrl+n/p` | Next/previous session window (from claude window) |

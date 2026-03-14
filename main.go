@@ -14,6 +14,7 @@ import (
 
 	"github.com/stefanoguerrini/c9s/internal/claude"
 	"github.com/stefanoguerrini/c9s/internal/config"
+	"github.com/stefanoguerrini/c9s/internal/git"
 	"github.com/stefanoguerrini/c9s/internal/tmux"
 )
 
@@ -89,11 +90,14 @@ type statusMsg struct {
 
 type clearStatusMsg struct{}
 
-// displayItem is either a group header or a session row.
+// displayItem is either a group header, a session row, or a worktree sub-row.
 type displayItem struct {
-	isHeader bool
-	header   string
-	session  claude.SessionInfo
+	isHeader      bool
+	header        string
+	session       claude.SessionInfo
+	isWorktreeRow bool         // sub-row showing a worktree
+	worktree      git.Worktree // worktree info for sub-row
+	isLastWT      bool         // last worktree sub-row (for └─ vs ├─)
 }
 
 // managedWindow tracks a tmux window we opened for a session.
@@ -135,6 +139,11 @@ type model struct {
 	pickingEffort bool
 	effortWorkDir string // project dir for the new session
 
+	// Worktree display
+	showWorktrees     bool                      // global toggle (for "all" mode)
+	expandedWorktrees map[int]bool              // per-cursor expanded state (for "selected" mode)
+	worktreeCache     map[string][]git.Worktree // project dir → worktrees
+
 	// Config screen
 	configScreen  bool
 	configDraft   config.Config
@@ -144,6 +153,7 @@ type model struct {
 	configEditing bool
 	configEditIdx int
 	configInput   textinput.Model
+	configShowDesc bool // show field descriptions
 
 	// Demo mode (--demo flag, fake data for screenshots)
 	demoMode bool
@@ -166,14 +176,22 @@ func initialModel(sessions []claude.SessionInfo, err error, insideTmux bool) mod
 	ci.Prompt = "  "
 	ci.CharLimit = 40
 
+
+
 	return model{
-		sessions:        sessions,
-		err:             err,
-		searchInput:     si,
-		renameInput:     ri,
-		configInput:     ci,
-		insideTmux:      insideTmux,
-		managedWindows:  make(map[string]managedWindow),
+		sessions:          sessions,
+		err:               err,
+		searchInput:       si,
+		renameInput:       ri,
+		configInput:       ci,
+		insideTmux:        insideTmux,
+		managedWindows:    make(map[string]managedWindow),
+		expandedWorktrees: make(map[int]bool),
+		worktreeCache:     make(map[string][]git.Worktree),
+		showTokens:        cfg.Dashboard.ShowTokens,
+		showPreview:       cfg.Dashboard.ShowPreview,
+		showWorktrees:     cfg.Dashboard.ShowWorktrees,
+		groupBy:           groupMode(cfg.Dashboard.GroupBy),
 	}
 }
 
@@ -208,6 +226,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// Keep backups up to date with source files.
 			claude.RefreshBackups()
+			// Refresh worktree cache (cheap git calls, only when feature enabled).
+			if cfg.Worktrees != "off" && git.Available() {
+				for dir := range m.worktreeCache {
+					m.worktreeCache[dir] = git.ListWorktrees(dir)
+				}
+			}
 		}
 		// Update pane statuses for managed windows.
 		for key, mw := range m.managedWindows {
@@ -279,6 +303,7 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.searchInput.Blur()
 		m.cursor = 0
 		m.scroll = 0
+		m.expandedWorktrees = make(map[int]bool)
 		return m, nil
 	case "enter":
 		m.searching = false
@@ -286,6 +311,7 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.searchInput.Blur()
 		m.cursor = 0
 		m.scroll = 0
+		m.expandedWorktrees = make(map[int]bool)
 		return m, nil
 	}
 	var cmd tea.Cmd
@@ -293,6 +319,7 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.filter = m.searchInput.Value()
 	m.cursor = 0
 	m.scroll = 0
+	m.expandedWorktrees = make(map[int]bool)
 	return m, cmd
 }
 
@@ -345,16 +372,38 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.scroll = 0
 		newItems := m.items()
 		m.skipHeaders(newItems, 1)
+		m.saveDashboardState()
 	case "t":
 		m.showTokens = !m.showTokens
+		m.saveDashboardState()
 	case "p":
 		m.showPreview = !m.showPreview
+		m.saveDashboardState()
 	case "esc":
 		if m.filter != "" {
 			m.filter = ""
 			m.searchInput.SetValue("")
 			m.cursor = 0
 			m.scroll = 0
+		}
+	case "w":
+		if cfg.Worktrees != "off" {
+			if cfg.WorktreeExpand == "selected" {
+				m.expandedWorktrees[m.cursor] = !m.expandedWorktrees[m.cursor]
+			} else {
+				m.showWorktrees = !m.showWorktrees
+			}
+			// Populate worktree cache for visible sessions.
+			if !m.demoMode {
+				for _, s := range m.filtered() {
+					if s.ProjectPath != "" {
+						if _, ok := m.worktreeCache[s.ProjectPath]; !ok {
+							m.worktreeCache[s.ProjectPath] = git.ListWorktrees(s.ProjectPath)
+						}
+					}
+				}
+			}
+			m.saveDashboardState()
 		}
 	case "enter":
 		return m.openSession(items)
@@ -380,6 +429,14 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 	if !m.insideTmux {
 		return m, statusCmd("tmux required — run c9s outside tmux to auto-bootstrap", true)
 	}
+
+	// If a worktree sub-row is selected, start a new session in that worktree dir.
+	if m.cursor >= 0 && m.cursor < len(items) && items[m.cursor].isWorktreeRow {
+		wt := items[m.cursor].worktree
+		m.effortWorkDir = wt.Path
+		return m.newSession(nil, "")
+	}
+
 	s := m.selectedSession(items)
 	if s == nil {
 		return m, nil
@@ -450,12 +507,15 @@ func (m model) newSession(items []displayItem, effort string) (tea.Model, tea.Cm
 		return m, statusCmd("tmux required — run c9s outside tmux to auto-bootstrap", true)
 	}
 
-	// Use the selected session's project dir, or cwd.
+	// Use the selected session's project dir, configured work_dir, or cwd.
 	workDir := m.effortWorkDir
 	if workDir == "" {
 		if s := m.selectedSession(items); s != nil && s.ProjectPath != "" {
 			workDir = s.ProjectPath
 		}
+	}
+	if workDir == "" && cfg.WorkDir != "" {
+		workDir = cfg.WorkDir
 	}
 	if workDir == "" {
 		workDir, _ = os.Getwd()
@@ -466,7 +526,8 @@ func (m model) newSession(items []displayItem, effort string) (tea.Model, tea.Cm
 		cmd = fmt.Sprintf("claude --effort %s", effort)
 	}
 
-	name := filepath.Base(workDir)
+	// Name the window with project + short timestamp to distinguish multiple sessions.
+	name := fmt.Sprintf("%s·%s", filepath.Base(workDir), time.Now().Format("15:04"))
 	windowID, err := tmux.NewWindow(name, cmd, workDir)
 	if err != nil {
 		return m, statusCmd(fmt.Sprintf("failed to create session: %v", err), true)
@@ -518,6 +579,33 @@ func (m model) updateEffortPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// getWorktrees returns cached worktrees for a project dir.
+func (m *model) getWorktrees(dir string) []git.Worktree {
+	if m.demoMode {
+		if wts, ok := claude.DemoWorktrees[dir]; ok {
+			return wts
+		}
+		return nil
+	}
+	if wts, ok := m.worktreeCache[dir]; ok {
+		return wts
+	}
+	wts := git.ListWorktrees(dir)
+	m.worktreeCache[dir] = wts
+	return wts
+}
+
+// saveDashboardState persists toggle states to config so they survive restarts.
+func (m model) saveDashboardState() {
+	cfg.Dashboard = config.Dashboard{
+		ShowTokens:    m.showTokens,
+		ShowPreview:   m.showPreview,
+		ShowWorktrees: m.showWorktrees,
+		GroupBy:       int(m.groupBy),
+	}
+	config.Save(cfg)
 }
 
 // enterConfigScreen switches to the in-app config editor.
@@ -576,6 +664,8 @@ func (m model) updateConfigNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "d":
 		m.configDraft = config.Default()
 		return m, nil
+	case "?":
+		m.configShowDesc = !m.configShowDesc
 	case "up", "k":
 		if m.configCursor > 0 {
 			m.configCursor--
@@ -589,16 +679,20 @@ func (m model) updateConfigNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", " ":
 		if m.configCursor >= 0 && m.configCursor < len(items) && !items[m.configCursor].isHeader {
 			f := m.configFields[items[m.configCursor].fieldIdx]
-			if f.Key == "theme" {
-				// Toggle theme.
-				if m.configDraft.Theme == "default" {
-					m.configDraft.Theme = "custom"
-				} else {
-					m.configDraft.Theme = "default"
+			if len(f.Options) > 0 {
+				// Cycle through options.
+				current := f.Get(m.configDraft)
+				next := f.Options[0]
+				for i, opt := range f.Options {
+					if opt == current && i+1 < len(f.Options) {
+						next = f.Options[i+1]
+						break
+					}
 				}
+				f.Set(&m.configDraft, next)
 				return m, nil
 			}
-			// Start editing.
+			// Start editing (free text input).
 			m.configEditing = true
 			m.configEditIdx = items[m.configCursor].fieldIdx
 			m.configInput.SetValue(f.Get(m.configDraft))
@@ -721,13 +815,17 @@ func (m model) configView() string {
 		var row string
 		if m.configEditing && item.fieldIdx == m.configEditIdx {
 			row = dimStyle.Render(label) + m.configInput.View()
-		} else if f.Key == "theme" {
-			// Theme toggle with visual indicator.
-			indicator := "◀ default ▸"
-			if m.configDraft.Theme == "custom" {
-				indicator = "◀ custom ▸"
+		} else if len(f.Options) > 0 {
+			// Dropdown-style: show all options, highlight current.
+			var optParts []string
+			for _, opt := range f.Options {
+				if opt == val {
+					optParts = append(optParts, helpKeyStyle.Render(opt))
+				} else {
+					optParts = append(optParts, dimStyle.Render(opt))
+				}
 			}
-			row = dimStyle.Render(label) + helpKeyStyle.Render(indicator)
+			row = dimStyle.Render(label) + "◀ " + strings.Join(optParts, " | ") + " ▸"
 		} else {
 			// Color fields: show a color swatch.
 			valDisplay := previewVal.Render(val)
@@ -750,6 +848,12 @@ func (m model) configView() string {
 
 		b.WriteString(row)
 		b.WriteString("\n")
+
+		// Show description below the selected field when ? is toggled.
+		if m.configShowDesc && i == m.configCursor && f.Desc != "" {
+			b.WriteString(dimStyle.Render("    " + f.Desc))
+			b.WriteString("\n")
+		}
 	}
 
 	// Fill remaining lines.
@@ -774,10 +878,15 @@ func (m model) configFooter() string {
 			helpKeyStyle.Render("enter") + " accept  " +
 			helpKeyStyle.Render("esc") + " cancel")
 	}
+	descLabel := "show help"
+	if m.configShowDesc {
+		descLabel = "hide help"
+	}
 	return helpStyle.Render(" " +
 		helpKeyStyle.Render("j/k") + " nav  " +
 		helpKeyStyle.Render("enter") + " edit  " +
 		helpKeyStyle.Render("space") + " toggle  " +
+		helpKeyStyle.Render("?") + " " + descLabel + "  " +
 		helpKeyStyle.Render("d") + " reset  " +
 		helpKeyStyle.Render("s") + " save  " +
 		helpKeyStyle.Render("q") + " cancel")
@@ -1004,6 +1113,28 @@ func (m model) View() string {
 				line += groupStyle.Render(strings.Repeat("─", padW))
 			}
 			tableLines = append(tableLines, line)
+			continue
+		}
+		if item.isWorktreeRow {
+			prefix := "  ├─ "
+			if item.isLastWT {
+				prefix = "  └─ "
+			}
+			row := m.renderColumns(
+				"",
+				prefix+item.worktree.Branch,
+				"",
+				"",
+				item.worktree.Path,
+				"",
+				"",
+				"",
+				true, // dim
+			)
+			if i == m.cursor {
+				row = selectedStyle.Width(tw).Render(row)
+			}
+			tableLines = append(tableLines, row)
 			continue
 		}
 
@@ -1240,6 +1371,20 @@ func (m model) footer() string {
 		helpKeyStyle.Render("tab") + " " + groupLabel,
 		helpKeyStyle.Render("p") + " " + previewLabel,
 		helpKeyStyle.Render("t") + " " + tokenLabel,
+	)
+	if cfg.Worktrees != "off" {
+		wtLabel := "show worktrees"
+		if cfg.WorktreeExpand == "selected" {
+			wtLabel = "expand"
+			if m.expandedWorktrees[m.cursor] {
+				wtLabel = "collapse"
+			}
+		} else if m.showWorktrees {
+			wtLabel = "hide worktrees"
+		}
+		parts = append(parts, helpKeyStyle.Render("w")+" "+wtLabel)
+	}
+	parts = append(parts,
 		helpKeyStyle.Render("c") + " config",
 		helpKeyStyle.Render("q") + " quit",
 	)
@@ -1260,7 +1405,8 @@ func (m model) filtered() []claude.SessionInfo {
 	for _, s := range m.sessions {
 		if strings.Contains(strings.ToLower(s.DisplayName()), f) ||
 			strings.Contains(strings.ToLower(s.ProjectPath), f) ||
-			strings.Contains(strings.ToLower(s.SessionID), f) {
+			strings.Contains(strings.ToLower(s.SessionID), f) ||
+			strings.Contains(strings.ToLower(s.GitBranch), f) {
 			out = append(out, s)
 		}
 	}
@@ -1270,89 +1416,129 @@ func (m model) filtered() []claude.SessionInfo {
 // items returns display items, optionally grouped.
 func (m model) items() []displayItem {
 	sessions := m.filtered()
+	var base []displayItem
+
 	if m.groupBy == groupNone {
-		items := make([]displayItem, len(sessions))
+		base = make([]displayItem, len(sessions))
 		for i, s := range sessions {
-			items[i] = displayItem{session: s}
+			base[i] = displayItem{session: s}
 		}
-		return items
-	}
-
-	type group struct {
-		name   string
-		items  []claude.SessionInfo
-		newest time.Time
-		order  int // for fixed ordering in status mode
-	}
-	groups := make(map[string]*group)
-	var order []string
-
-	for _, s := range sessions {
-		var name string
-		var sortOrder int
-		switch m.groupBy {
-		case groupProject:
-			name = projectName(s.ProjectPath)
-			if name == "" {
-				name = "(no project)"
-			}
-		case groupStatus:
-			// Use the effective status (pane status for managed windows).
-			if mw, ok := m.managedWindows[s.SessionID]; ok {
-				name = mw.paneStatus.String()
-			} else {
-				name = s.Status.String()
-			}
-			// Fixed order: processing, waiting, active, idle, done, resumable, archived.
-			switch name {
-			case "processing":
-				sortOrder = 0
-			case "waiting":
-				sortOrder = 1
-			case "active":
-				sortOrder = 2
-			case "idle":
-				sortOrder = 3
-			case "done":
-				sortOrder = 4
-			case "resumable":
-				sortOrder = 5
-			case "archived":
-				sortOrder = 6
-			}
-		}
-
-		g, ok := groups[name]
-		if !ok {
-			g = &group{name: name, order: sortOrder}
-			groups[name] = g
-			order = append(order, name)
-		}
-		g.items = append(g.items, s)
-		if s.Modified.After(g.newest) {
-			g.newest = s.Modified
-		}
-	}
-
-	if m.groupBy == groupStatus {
-		sort.Slice(order, func(i, j int) bool {
-			return groups[order[i]].order < groups[order[j]].order
-		})
 	} else {
-		sort.Slice(order, func(i, j int) bool {
-			return groups[order[i]].newest.After(groups[order[j]].newest)
-		})
+		type group struct {
+			name   string
+			items  []claude.SessionInfo
+			newest time.Time
+			order  int // for fixed ordering in status mode
+		}
+		groups := make(map[string]*group)
+		var order []string
+
+		for _, s := range sessions {
+			var name string
+			var sortOrder int
+			switch m.groupBy {
+			case groupProject:
+				name = projectName(s.ProjectPath)
+				if name == "" {
+					name = "(no project)"
+				}
+			case groupStatus:
+				// Use the effective status (pane status for managed windows).
+				if mw, ok := m.managedWindows[s.SessionID]; ok {
+					name = mw.paneStatus.String()
+				} else {
+					name = s.Status.String()
+				}
+				// Fixed order: processing, waiting, active, idle, done, resumable, archived.
+				switch name {
+				case "processing":
+					sortOrder = 0
+				case "waiting":
+					sortOrder = 1
+				case "active":
+					sortOrder = 2
+				case "idle":
+					sortOrder = 3
+				case "done":
+					sortOrder = 4
+				case "resumable":
+					sortOrder = 5
+				case "archived":
+					sortOrder = 6
+				}
+			}
+
+			g, ok := groups[name]
+			if !ok {
+				g = &group{name: name, order: sortOrder}
+				groups[name] = g
+				order = append(order, name)
+			}
+			g.items = append(g.items, s)
+			if s.Modified.After(g.newest) {
+				g.newest = s.Modified
+			}
+		}
+
+		if m.groupBy == groupStatus {
+			sort.Slice(order, func(i, j int) bool {
+				return groups[order[i]].order < groups[order[j]].order
+			})
+		} else {
+			sort.Slice(order, func(i, j int) bool {
+				return groups[order[i]].newest.After(groups[order[j]].newest)
+			})
+		}
+
+		for _, name := range order {
+			g := groups[name]
+			base = append(base, displayItem{isHeader: true, header: fmt.Sprintf("%s (%d)", g.name, len(g.items))})
+			for _, s := range g.items {
+				base = append(base, displayItem{session: s})
+			}
+		}
+	}
+
+	// Insert worktree sub-rows if enabled.
+	if cfg.Worktrees == "off" {
+		return base
 	}
 
 	var result []displayItem
-	for _, name := range order {
-		g := groups[name]
-		result = append(result, displayItem{isHeader: true, header: fmt.Sprintf("%s (%d)", g.name, len(g.items))})
-		for _, s := range g.items {
-			result = append(result, displayItem{session: s})
+	sessionIdx := 0 // index of session rows only (for "selected" mode)
+	for _, item := range base {
+		result = append(result, item)
+		if item.isHeader {
+			continue
 		}
+		// Check if we should show worktree sub-rows for this session.
+		show := false
+		if cfg.WorktreeExpand == "all" {
+			show = m.showWorktrees
+		} else {
+			show = m.expandedWorktrees[sessionIdx]
+		}
+		if show && item.session.ProjectPath != "" {
+			wts := m.lookupWorktrees(item.session.ProjectPath)
+			for i, wt := range wts {
+				result = append(result, displayItem{
+					isWorktreeRow: true,
+					worktree:      wt,
+					isLastWT:      i == len(wts)-1,
+				})
+			}
+		}
+		sessionIdx++
 	}
 	return result
+}
+
+// lookupWorktrees returns worktrees from cache (read-only, no cache mutation).
+func (m model) lookupWorktrees(dir string) []git.Worktree {
+	if m.demoMode {
+		return claude.DemoWorktrees[dir]
+	}
+	return m.worktreeCache[dir]
 }
 
 func (m model) tableHeight() int {
@@ -1374,7 +1560,7 @@ func (m *model) adjustScroll() {
 }
 
 func (m model) renderHeader() string {
-	return m.renderColumns("#", "NAME", "STATUS", "PROJECT", "MSGS", "TOKENS", "MODIFIED", false)
+	return m.renderColumns("#", "NAME", "STATUS", "BRANCH", "PROJECT", "MSGS", "TOKENS", "MODIFIED", false)
 }
 
 func (m model) renderRow(num int, s claude.SessionInfo) string {
@@ -1392,6 +1578,7 @@ func (m model) renderRow(num int, s claude.SessionInfo) string {
 		fmt.Sprintf("%d", num),
 		s.DisplayName(),
 		status,
+		s.GitBranch,
 		projectName(s.ProjectPath),
 		fmt.Sprintf("%d", s.MessageCount),
 		tokStr,
@@ -1401,7 +1588,11 @@ func (m model) renderRow(num int, s claude.SessionInfo) string {
 	return row
 }
 
-func (m model) renderColumns(num, name, status, project, msgs, tokens, modified string, dim bool) string {
+func (m model) showBranchCol() bool {
+	return m.showWorktrees && cfg.Worktrees != "off"
+}
+
+func (m model) renderColumns(num, name, status, branch, project, msgs, tokens, modified string, dim bool) string {
 	tw := m.tableWidth()
 	modW := 11
 	msgsW := 5
@@ -1409,6 +1600,10 @@ func (m model) renderColumns(num, name, status, project, msgs, tokens, modified 
 	tokW := 0
 	if m.showTokens {
 		tokW = 8
+	}
+	branchW := 0
+	if m.showBranchCol() {
+		branchW = 14
 	}
 	projW := 0
 	if tw >= 90 {
@@ -1422,6 +1617,9 @@ func (m model) renderColumns(num, name, status, project, msgs, tokens, modified 
 	}
 	if tokW > 0 {
 		nameW -= tokW + 1
+	}
+	if branchW > 0 {
+		nameW -= branchW + 1
 	}
 	if nameW < 10 {
 		nameW = 10
@@ -1452,6 +1650,9 @@ func (m model) renderColumns(num, name, status, project, msgs, tokens, modified 
 	parts = append(parts, fmt.Sprintf(" %-*s", numW, trunc(num, numW)))
 	parts = append(parts, fmt.Sprintf("%-*s", nameW, trunc(name, nameW)))
 	parts = append(parts, statusCell)
+	if branchW > 0 {
+		parts = append(parts, fmt.Sprintf("%-*s", branchW, trunc(branch, branchW)))
+	}
 	if projW > 0 {
 		parts = append(parts, fmt.Sprintf("%-*s", projW, trunc(project, projW)))
 	}
@@ -1627,7 +1828,9 @@ func main() {
 	m := initialModel(sessions, loadErr, insideTmux || tmux.InC9sSession())
 	m.demoMode = demoMode
 	if demoMode {
-		m.showTokens = true // show tokens in demo for nicer screenshots
+		m.showTokens = true    // show tokens in demo for nicer screenshots
+		m.showWorktrees = true // show worktrees in demo
+		cfg.Worktrees = "always"
 		// Simulate managed windows with pane statuses for some sessions.
 		for _, s := range sessions {
 			switch s.DemoPaneStatus {

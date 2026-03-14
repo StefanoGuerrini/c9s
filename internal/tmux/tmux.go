@@ -87,7 +87,11 @@ func NewWindow(name, shellCmd, workDir string) (string, error) {
 	args = append(args, "sh", "-c", wrapped)
 	out, err := exec.Command("tmux", args...).Output()
 	if err != nil {
-		return "", fmt.Errorf("tmux new-window: %w", err)
+		detail := ""
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			detail = ": " + strings.TrimSpace(string(ee.Stderr))
+		}
+		return "", fmt.Errorf("tmux new-window in %q%s", workDir, detail)
 	}
 	return strings.TrimSpace(string(out)), nil
 }

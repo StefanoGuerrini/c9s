@@ -15,8 +15,20 @@ type Config struct {
 	Theme          string `json:"theme"`            // "default" or "custom"
 	RefreshSeconds int    `json:"refresh_seconds"`  // dashboard refresh interval (default: 3)
 	ScrollSpeed    int    `json:"scroll_speed"`     // lines per mouse scroll event (default: 3)
+	WorkDir        string `json:"work_dir"`         // default working directory for new sessions (empty = cwd)
+	Worktrees      string `json:"worktrees"`        // "off" (default), "auto", "always"
+	WorktreeExpand string `json:"worktree_expand"`  // "all" (default), "selected"
 	Keys           Keys   `json:"keys"`
 	Colors         Colors `json:"colors"`
+	Dashboard      Dashboard `json:"dashboard"`     // persisted dashboard state
+}
+
+// Dashboard persists the last-used dashboard toggle states.
+type Dashboard struct {
+	ShowTokens    bool   `json:"show_tokens"`
+	ShowPreview   bool   `json:"show_preview"`
+	ShowWorktrees bool   `json:"show_worktrees"`
+	GroupBy       int    `json:"group_by"`       // 0=none, 1=project, 2=status
 }
 
 // Keys defines tmux-level navigation keybindings.
@@ -70,6 +82,8 @@ func Default() Config {
 		Theme:          "default",
 		RefreshSeconds: 3,
 		ScrollSpeed:    3,
+		Worktrees:      "off",
+		WorktreeExpand: "all",
 		Keys: Keys{
 			Dashboard:   "C-d",
 			NextSession: "C-n",
@@ -119,11 +133,13 @@ func (c Config) EffectiveColors() Colors {
 
 // Field describes one editable item in the config screen.
 type Field struct {
-	Section string // "Shortcuts", "Theme"
+	Section string // "Shortcuts", "Theme", "Worktrees (beta)"
 	Label   string // human-readable label
 	Key     string // unique identifier
+	Desc    string // short description shown with ? key
 	Get     func(Config) string
 	Set     func(*Config, string)
+	Options []string // if non-nil, cycle through these on Enter (dropdown-style)
 }
 
 // EditableFields returns the list of all configurable fields.
@@ -131,7 +147,8 @@ func EditableFields() []Field {
 	return []Field{
 		// General
 		{Section: "General", Label: "Refresh interval", Key: "refresh_seconds",
-			Get: func(c Config) string { return fmt.Sprintf("%d", c.RefreshSeconds) },
+			Desc: "Dashboard refresh rate in seconds (1-10)",
+			Get:  func(c Config) string { return fmt.Sprintf("%d", c.RefreshSeconds) },
 			Set: func(c *Config, v string) {
 				n, err := strconv.Atoi(v)
 				if err == nil && n >= 1 && n <= 10 {
@@ -139,27 +156,56 @@ func EditableFields() []Field {
 				}
 			}},
 		{Section: "General", Label: "Scroll speed", Key: "scroll_speed",
-			Get: func(c Config) string { return fmt.Sprintf("%d", c.ScrollSpeed) },
+			Desc: "Lines per mouse scroll event in session windows (1-10)",
+			Get:  func(c Config) string { return fmt.Sprintf("%d", c.ScrollSpeed) },
 			Set: func(c *Config, v string) {
 				n, err := strconv.Atoi(v)
 				if err == nil && n >= 1 && n <= 10 {
 					c.ScrollSpeed = n
 				}
 			}},
+		{Section: "General", Label: "Work directory", Key: "work_dir",
+			Desc: "Default directory for new sessions (empty = current directory)",
+			Get:  func(c Config) string { return c.WorkDir },
+			Set:  func(c *Config, v string) { c.WorkDir = v }},
+		// Worktrees (beta)
+		{Section: "Worktrees (beta)", Label: "Mode", Key: "worktrees",
+			Desc:    "off: disabled, auto: show if worktrees exist, always: always show",
+			Options: []string{"off", "auto", "always"},
+			Get:     func(c Config) string { return c.Worktrees },
+			Set: func(c *Config, v string) {
+				if v == "off" || v == "auto" || v == "always" {
+					c.Worktrees = v
+				}
+			}},
+		{Section: "Worktrees (beta)", Label: "Expand", Key: "worktree_expand",
+			Desc:    "all: toggle all worktrees at once, selected: expand per session",
+			Options: []string{"all", "selected"},
+			Get:     func(c Config) string { return c.WorktreeExpand },
+			Set: func(c *Config, v string) {
+				if v == "all" || v == "selected" {
+					c.WorktreeExpand = v
+				}
+			}},
 		// Shortcuts
 		{Section: "Shortcuts", Label: "Dashboard", Key: "dashboard",
-			Get: func(c Config) string { return c.Keys.Dashboard },
-			Set: func(c *Config, v string) { c.Keys.Dashboard = v }},
+			Desc: "Return to dashboard from session window (tmux key syntax)",
+			Get:  func(c Config) string { return c.Keys.Dashboard },
+			Set:  func(c *Config, v string) { c.Keys.Dashboard = v }},
 		{Section: "Shortcuts", Label: "Next session", Key: "next_session",
-			Get: func(c Config) string { return c.Keys.NextSession },
-			Set: func(c *Config, v string) { c.Keys.NextSession = v }},
+			Desc: "Switch to next session window (tmux key syntax)",
+			Get:  func(c Config) string { return c.Keys.NextSession },
+			Set:  func(c *Config, v string) { c.Keys.NextSession = v }},
 		{Section: "Shortcuts", Label: "Prev session", Key: "prev_session",
-			Get: func(c Config) string { return c.Keys.PrevSession },
-			Set: func(c *Config, v string) { c.Keys.PrevSession = v }},
+			Desc: "Switch to previous session window (tmux key syntax)",
+			Get:  func(c Config) string { return c.Keys.PrevSession },
+			Set:  func(c *Config, v string) { c.Keys.PrevSession = v }},
 		// Theme toggle
 		{Section: "Theme", Label: "Color scheme", Key: "theme",
-			Get: func(c Config) string { return c.Theme },
-			Set: func(c *Config, v string) { c.Theme = v }},
+			Desc:    "default: built-in colors, custom: edit colors below",
+			Options: []string{"default", "custom"},
+			Get:     func(c Config) string { return c.Theme },
+			Set:     func(c *Config, v string) { c.Theme = v }},
 		// Colors (only visible when theme == "custom")
 		{Section: "Theme", Label: "Title", Key: "title",
 			Get: func(c Config) string { return c.Colors.Title },

@@ -34,6 +34,9 @@ It reads directly from `~/.claude/`. No API calls, no network, no daemon. One bi
 - **Group by project or status** -- cycle grouping modes with `Tab`
 - **Token usage** -- see total tokens per session
 - **Rename sessions** -- give sessions meaningful names
+- **Git worktree awareness** *(beta)* -- see worktrees per session, open sessions in any worktree
+- **Mouse scroll** -- scroll through Claude conversation history, hold Shift/Option to copy text
+- **Persistent dashboard state** -- toggles (tokens, preview, grouping, worktrees) survive restarts
 - **Fully configurable** -- colors, keybindings, refresh interval via `~/.c9s/config.json`
 
 ## Install
@@ -86,6 +89,7 @@ Want to try it without real sessions? Run `c9s --demo` to see the dashboard with
 | `Tab` | Cycle grouping: none / project / status |
 | `p` | Toggle preview panel |
 | `t` | Toggle token column |
+| `w` | Toggle worktree sub-rows (when enabled) |
 | `c` | Open config editor |
 | `q` / `Ctrl+c` | Quit (kills tmux session) |
 
@@ -120,6 +124,20 @@ For sessions opened through c9s, you also see real-time pane status:
 | **waiting** | Claude needs your input (tool approval, question) |
 | **done** | Task completed, at the main prompt |
 
+## Git worktrees (beta)
+
+If you use git worktrees for parallel development, c9s can show them in the dashboard. This feature is **off by default** -- enable it in the config editor (`c` → Worktrees → Mode).
+
+| Mode | Behavior |
+|------|----------|
+| `off` | Worktrees disabled (default) |
+| `auto` | Show worktrees when a project has 2+ worktrees |
+| `always` | Always show worktrees |
+
+Once enabled, press `w` to toggle worktree sub-rows beneath sessions. Select a worktree and press `Enter` to start a new Claude session in that directory.
+
+This feature is in beta -- we're still evaluating the best experience while keeping c9s simple.
+
 ## Configuration
 
 ![c9s config editor](docs/config.png)
@@ -129,9 +147,14 @@ c9s stores its config at `~/.c9s/config.json`. You can edit it directly or use t
 Configurable settings:
 
 - **Refresh interval** -- how often the dashboard polls for updates (1-10 seconds)
+- **Scroll speed** -- lines per mouse scroll event in session windows (1-10)
+- **Work directory** -- default directory for new sessions (empty = current directory)
+- **Worktrees** -- mode (off/auto/always) and expand behavior (all/selected)
 - **Navigation keys** -- tmux keybindings for dashboard/next/prev session (default: `Ctrl+d`, `Ctrl+n`, `Ctrl+p`)
 - **Color theme** -- switch between `default` and `custom`, then tweak individual colors
 - **All colors** -- title, header, status indicators, preview panel, tmux status bar
+
+Press `?` in the config editor to see descriptions for each setting.
 
 Example config:
 

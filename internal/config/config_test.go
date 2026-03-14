@@ -44,8 +44,8 @@ func TestEffectiveColors(t *testing.T) {
 
 func TestEditableFields(t *testing.T) {
 	fields := EditableFields()
-	if len(fields) < 5 {
-		t.Fatalf("expected at least 5 fields, got %d", len(fields))
+	if len(fields) < 7 {
+		t.Fatalf("expected at least 7 fields, got %d", len(fields))
 	}
 
 	// First field should be refresh interval (General section).
@@ -61,19 +61,41 @@ func TestEditableFields(t *testing.T) {
 		t.Errorf("field[1].Key = %q, want scroll_speed", fields[1].Key)
 	}
 
+	// Third field should be work directory (General section).
+	if fields[2].Key != "work_dir" {
+		t.Errorf("field[2].Key = %q, want work_dir", fields[2].Key)
+	}
+
+	// Fourth and fifth are worktree fields (Worktrees section).
+	if fields[3].Key != "worktrees" {
+		t.Errorf("field[3].Key = %q, want worktrees", fields[3].Key)
+	}
+	if fields[3].Section != "Worktrees (beta)" {
+		t.Errorf("field[3].Section = %q, want Worktrees (beta)", fields[3].Section)
+	}
+	if len(fields[3].Options) != 3 {
+		t.Errorf("worktrees Options = %v, want 3 options", fields[3].Options)
+	}
+	if fields[4].Key != "worktree_expand" {
+		t.Errorf("field[4].Key = %q, want worktree_expand", fields[4].Key)
+	}
+	if len(fields[4].Options) != 2 {
+		t.Errorf("worktree_expand Options = %v, want 2 options", fields[4].Options)
+	}
+
 	// Next 3 should be shortcuts.
 	for i, key := range []string{"dashboard", "next_session", "prev_session"} {
-		if fields[i+2].Key != key {
-			t.Errorf("field[%d].Key = %q, want %q", i+2, fields[i+2].Key, key)
+		if fields[i+5].Key != key {
+			t.Errorf("field[%d].Key = %q, want %q", i+5, fields[i+5].Key, key)
 		}
-		if fields[i+2].Section != "Shortcuts" {
-			t.Errorf("field[%d].Section = %q, want Shortcuts", i+2, fields[i+2].Section)
+		if fields[i+5].Section != "Shortcuts" {
+			t.Errorf("field[%d].Section = %q, want Shortcuts", i+5, fields[i+5].Section)
 		}
 	}
 
-	// 6th should be theme toggle.
-	if fields[5].Key != "theme" {
-		t.Errorf("field[5].Key = %q, want theme", fields[5].Key)
+	// 9th should be theme toggle.
+	if fields[8].Key != "theme" {
+		t.Errorf("field[8].Key = %q, want theme", fields[8].Key)
 	}
 
 	// Test Get/Set roundtrip on refresh field.
@@ -95,6 +117,58 @@ func TestEditableFields(t *testing.T) {
 	fields[0].Set(&cfg, "0")
 	if cfg.RefreshSeconds != 5 {
 		t.Errorf("out of range Set should not change value, got %d", cfg.RefreshSeconds)
+	}
+}
+
+func TestWorktreeConfigFields(t *testing.T) {
+	cfg := Default()
+	if cfg.Worktrees != "off" {
+		t.Errorf("default Worktrees = %q, want off", cfg.Worktrees)
+	}
+	if cfg.WorktreeExpand != "all" {
+		t.Errorf("default WorktreeExpand = %q, want all", cfg.WorktreeExpand)
+	}
+
+	// Test worktrees field validation via EditableFields.
+	fields := EditableFields()
+	var wtField, wtExpandField Field
+	for _, f := range fields {
+		if f.Key == "worktrees" {
+			wtField = f
+		}
+		if f.Key == "worktree_expand" {
+			wtExpandField = f
+		}
+	}
+
+	// Valid values.
+	wtField.Set(&cfg, "auto")
+	if cfg.Worktrees != "auto" {
+		t.Errorf("Set worktrees auto: got %q", cfg.Worktrees)
+	}
+	wtField.Set(&cfg, "always")
+	if cfg.Worktrees != "always" {
+		t.Errorf("Set worktrees always: got %q", cfg.Worktrees)
+	}
+	wtField.Set(&cfg, "off")
+	if cfg.Worktrees != "off" {
+		t.Errorf("Set worktrees off: got %q", cfg.Worktrees)
+	}
+
+	// Invalid value should be ignored.
+	wtField.Set(&cfg, "invalid")
+	if cfg.Worktrees != "off" {
+		t.Errorf("invalid Set should not change, got %q", cfg.Worktrees)
+	}
+
+	// WorktreeExpand validation.
+	wtExpandField.Set(&cfg, "selected")
+	if cfg.WorktreeExpand != "selected" {
+		t.Errorf("Set expand selected: got %q", cfg.WorktreeExpand)
+	}
+	wtExpandField.Set(&cfg, "invalid")
+	if cfg.WorktreeExpand != "selected" {
+		t.Errorf("invalid Set should not change, got %q", cfg.WorktreeExpand)
 	}
 }
 
