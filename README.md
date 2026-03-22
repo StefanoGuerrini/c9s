@@ -91,7 +91,7 @@ Want to try it without real sessions? Run `c9s --demo` to see the dashboard with
 | `t` | Toggle token column |
 | `w` | Toggle worktree sub-rows (when enabled) |
 | `c` | Open config editor |
-| `q` / `Ctrl+c` | Quit (kills tmux session) |
+| `q` / `Ctrl+c` | Quit (or detach if keep_alive is on) |
 
 ### Inside a Claude session window
 
@@ -149,6 +149,7 @@ Configurable settings:
 - **Refresh interval** -- how often the dashboard polls for updates (1-10 seconds)
 - **Scroll speed** -- lines per mouse scroll event in session windows (1-10)
 - **Work directory** -- default directory for new sessions (empty = current directory)
+- **Keep alive** -- when on, quitting c9s detaches instead of killing sessions. Claude keeps running in the background, re-run `c9s` to re-attach
 - **Worktrees** -- mode (off/auto/always) and expand behavior (all/selected)
 - **Navigation keys** -- tmux keybindings for dashboard/next/prev session (default: `Ctrl+d`, `Ctrl+n`, `Ctrl+p`)
 - **Color theme** -- switch between `default` and `custom`, then tweak individual colors
