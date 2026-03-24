@@ -248,9 +248,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 1) Check file mtime — if recently written, claude is processing.
 			recentlyActive := false
 			for _, s := range m.sessions {
-				if s.SessionID == mw.sessionID && !s.FileMtime.IsZero() {
-					if time.Since(s.FileMtime) < 10*time.Second {
+				if s.SessionID == mw.sessionID {
+					if !s.FileMtime.IsZero() && time.Since(s.FileMtime) < 10*time.Second {
 						recentlyActive = true
+					}
+					// Update usage in tmux status bar.
+					if usage := formatUsage(s); usage != "" {
+						tmux.SetWindowEnv(mw.windowID, "c9s-usage", usage)
 					}
 					break
 				}
@@ -883,7 +887,7 @@ func (m model) saveConfig() (tea.Model, tea.Cmd) {
 			tmux.CleanupNavigationKeys(oldKeys)
 			tmux.SetupNavigationKeys(newKeys)
 		}
-		tmux.ConfigureStatusBar(newKeys, statusColors(), version, cfg.ScrollSpeed)
+		tmux.ConfigureStatusBar(newKeys, statusColors(), version, cfg.ScrollSpeed, cfg.RefreshSeconds)
 	}
 
 	m.configScreen = false
@@ -1866,6 +1870,53 @@ func fmtModified(t time.Time) string {
 	}
 }
 
+// formatUsage builds the usage string for the tmux status bar based on config.
+func formatUsage(s claude.SessionInfo) string {
+	if cfg.StatusUsage == "off" {
+		return ""
+	}
+	budgetTokens := s.InputTokens + s.OutputTokens
+	if budgetTokens == 0 {
+		return ""
+	}
+
+	// Get real usage percentage from Anthropic API (cached 30s).
+	var apiPercent string
+	if cfg.StatusUsage == "percent" || cfg.StatusUsage == "all" {
+		if usage, err := claude.FetchUsage(); err == nil {
+			apiPercent = fmt.Sprintf("%.0f%%", usage.FiveHour.Utilization)
+		}
+	}
+
+	var parts []string
+	switch cfg.StatusUsage {
+	case "tokens":
+		parts = append(parts, fmtTokens(budgetTokens))
+	case "percent":
+		if apiPercent != "" {
+			parts = append(parts, apiPercent)
+		}
+	case "cost":
+		parts = append(parts, fmt.Sprintf("~$%.2f", estimateCost(s)))
+	case "all":
+		parts = append(parts, fmtTokens(budgetTokens))
+		if apiPercent != "" {
+			parts = append(parts, apiPercent)
+		}
+		parts = append(parts, fmt.Sprintf("~$%.2f", estimateCost(s)))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// estimateCost returns the estimated API-equivalent cost for a session.
+// Uses Sonnet pricing: $3/M input, $15/M output, $0.30/M cache read.
+func estimateCost(s claude.SessionInfo) float64 {
+	inputCost := float64(s.InputTokens+s.CacheCreate) / 1_000_000 * 3.0
+	outputCost := float64(s.OutputTokens) / 1_000_000 * 15.0
+	cacheCost := float64(s.CacheRead) / 1_000_000 * 0.30
+	return inputCost + outputCost + cacheCost
+}
+
 func navKeys() tmux.NavKeys {
 	return tmux.NavKeys{
 		Dashboard:   cfg.Keys.Dashboard,
@@ -1955,7 +2006,7 @@ func main() {
 			// closed (e.g., after keep_alive detach killed the bubbletea process).
 			if !tmux.WindowExists(tmux.SessionName + ":" + tmux.DashboardWindow) {
 				tmux.CreateDashboardWindow(selfBin, args)
-				tmux.ConfigureStatusBar(navKeys(), statusColors(), version, cfg.ScrollSpeed)
+				tmux.ConfigureStatusBar(navKeys(), statusColors(), version, cfg.ScrollSpeed, cfg.RefreshSeconds)
 				tmux.SetupNavigationKeys(navKeys())
 			}
 			if err := tmux.Attach(); err != nil {
@@ -1964,7 +2015,7 @@ func main() {
 			}
 			return
 		}
-		if err := tmux.Bootstrap(selfBin, args, navKeys(), statusColors(), version, cfg.ScrollSpeed); err != nil {
+		if err := tmux.Bootstrap(selfBin, args, navKeys(), statusColors(), version, cfg.ScrollSpeed, cfg.RefreshSeconds); err != nil {
 			fmt.Fprintf(os.Stderr, "tmux bootstrap: %v\n", err)
 			os.Exit(1)
 		}

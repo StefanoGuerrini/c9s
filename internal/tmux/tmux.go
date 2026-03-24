@@ -44,7 +44,7 @@ func SessionExists() bool {
 // Bootstrap creates the c9s tmux session and attaches to it, re-executing
 // the given binary with --inside-tmux inside the session. This replaces the
 // current process (exec) on success.
-func Bootstrap(selfBin string, args []string, keys NavKeys, colors StatusColors, version string, scrollSpeed int) error {
+func Bootstrap(selfBin string, args []string, keys NavKeys, colors StatusColors, version string, scrollSpeed, refreshSeconds int) error {
 	// Create new tmux session with dashboard window running c9s --inside-tmux.
 	cmdArgs := append([]string{selfBin, "--inside-tmux"}, args...)
 	cmd := strings.Join(cmdArgs, " ")
@@ -59,7 +59,7 @@ func Bootstrap(selfBin string, args []string, keys NavKeys, colors StatusColors,
 	}
 
 	// Customize the status bar for c9s.
-	ConfigureStatusBar(keys, colors, version, scrollSpeed)
+	ConfigureStatusBar(keys, colors, version, scrollSpeed, refreshSeconds)
 
 	// Attach to the session (this takes over the terminal).
 	return Attach()
@@ -104,6 +104,11 @@ func NewWindow(name, shellCmd, workDir string) (string, error) {
 		return "", fmt.Errorf("tmux new-window in %q%s", workDir, detail)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// SetWindowEnv sets a per-window tmux user option (accessible in format strings as #{@key}).
+func SetWindowEnv(windowID, key, value string) {
+	exec.Command("tmux", "set-option", "-t", windowID, "@"+key, value).Run()
 }
 
 // SelectWindow switches to the given window in the c9s session.
@@ -347,7 +352,8 @@ func parseTmuxVersionSupportsSync(version string) bool {
 
 // ConfigureStatusBar customizes the tmux status bar and prefix for the c9s session.
 // scrollSpeed controls lines per mouse wheel event (0 or negative = tmux default).
-func ConfigureStatusBar(keys NavKeys, colors StatusColors, version string, scrollSpeed int) {
+// refreshSeconds controls the tmux status-interval for env var updates.
+func ConfigureStatusBar(keys NavKeys, colors StatusColors, version string, scrollSpeed, refreshSeconds int) {
 	t := func(option, value string) {
 		exec.Command("tmux", "set-option", "-t", SessionName, option, value).Run()
 	}
@@ -411,16 +417,23 @@ func ConfigureStatusBar(keys NavKeys, colors StatusColors, version string, scrol
 	w("allow-rename", "off")
 	w("monitor-activity", "off")
 
+	// Sync status bar refresh with c9s tick interval so usage updates promptly.
+	if refreshSeconds > 0 {
+		t("status-interval", fmt.Sprintf("%d", refreshSeconds))
+	}
+
 	nextPrev := keyDisplayName(keys.NextSession) + "/" + keyDisplayName(keys.PrevSession)[len("ctrl+"):]
 	dash := keyDisplayName(keys.Dashboard)
 	// On dashboard: show version right-aligned.
-	// On session windows: show nav hints right-aligned.
+	// On session windows: show usage + nav hints right-aligned.
+	// #{@c9s-usage} is set per-window by the tick handler with token/cost info.
+	usageFmt := fmt.Sprintf("#{?#{@c9s-usage},#[fg=%s]#{@c9s-usage}  ,}", colors.Fg)
 	t("status-format[0]",
 		fmt.Sprintf("#[fg=%s,bold] c9s #[fg=%s]│ #[fg=%s]#W ", colors.Accent, colors.Dim, colors.Fg)+
 			"#[align=right]"+
-			fmt.Sprintf("#{?#{==:#W,%s},#[fg=%s]%s ,#[fg=%s]%s switch  %s ← dashboard }",
+			fmt.Sprintf("#{?#{==:#W,%s},#[fg=%s]%s ,%s#[fg=%s]%s switch  %s ← dashboard }",
 				DashboardWindow, colors.Dim, version,
-				colors.Dim, nextPrev, dash))
+				usageFmt, colors.Dim, nextPrev, dash))
 }
 
 // SetupNavigationKeys binds configurable keys for the c9s session (root table, no prefix).

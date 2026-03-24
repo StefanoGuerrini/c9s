@@ -17,6 +17,7 @@ type Config struct {
 	ScrollSpeed    int    `json:"scroll_speed"`     // lines per mouse scroll event (default: 3)
 	WorkDir        string `json:"work_dir"`         // default working directory for new sessions (empty = cwd)
 	KeepAlive      string `json:"keep_alive"`       // "off" (default) or "on" — keep sessions running on quit
+	StatusUsage    string `json:"status_usage"`     // "off", "percent" (default), "tokens", "cost", "all"
 	Worktrees      string `json:"worktrees"`        // "off" (default), "auto", "always"
 	WorktreeExpand string `json:"worktree_expand"`  // "all" (default), "selected"
 	Keys           Keys   `json:"keys"`
@@ -84,6 +85,7 @@ func Default() Config {
 		RefreshSeconds: 3,
 		ScrollSpeed:    3,
 		KeepAlive:      "off",
+		StatusUsage:    "percent",
 		Worktrees:      "off",
 		WorktreeExpand: "all",
 		Keys: Keys{
@@ -177,6 +179,16 @@ func EditableFields() []Field {
 			Set: func(c *Config, v string) {
 				if v == "off" || v == "on" {
 					c.KeepAlive = v
+				}
+			}},
+		{Section: "General", Label: "Status bar usage", Key: "status_usage",
+			Desc:    "What to show in tmux status bar: token count, % of budget, estimated cost, or all",
+			Options: []string{"off", "percent", "tokens", "cost", "all"},
+			Get:     func(c Config) string { return c.StatusUsage },
+			Set: func(c *Config, v string) {
+				switch v {
+				case "off", "percent", "tokens", "cost", "all":
+					c.StatusUsage = v
 				}
 			}},
 		// Worktrees (beta)
