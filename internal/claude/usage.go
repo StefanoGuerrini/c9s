@@ -37,38 +37,75 @@ type ExtraUsage struct {
 
 // usageCache caches the API response and OAuth token.
 var usageCache struct {
-	mu      sync.Mutex
-	usage   *Usage
-	fetched time.Time
-	token   string
+	mu       sync.Mutex
+	usage    *Usage
+	fetched  time.Time
+	nextTry  time.Time // earliest time to retry after failure
+	failures int       // consecutive failure count for backoff
+	token    string
 }
 
+const (
+	usageCacheTTL  = 5 * time.Minute
+	usageMaxBackoff = 30 * time.Minute
+)
+
 // FetchUsage returns the current account usage from Anthropic's OAuth API.
-// Results are cached for 5 minutes to avoid rate limiting.
-// On error, returns the last cached value if available.
+// Results are cached for 5 minutes. On repeated failures, backs off
+// exponentially up to 30 minutes before retrying.
 func FetchUsage() (*Usage, error) {
 	usageCache.mu.Lock()
 	cached := usageCache.usage
-	fresh := usageCache.usage != nil && time.Since(usageCache.fetched) < 5*time.Minute
+	fresh := cached != nil && time.Since(usageCache.fetched) < usageCacheTTL
+	tooSoon := time.Now().Before(usageCache.nextTry)
 	usageCache.mu.Unlock()
 
 	if fresh {
 		return cached, nil
 	}
+	if tooSoon {
+		if cached != nil {
+			return cached, nil
+		}
+		return nil, fmt.Errorf("usage API: backing off after repeated failures")
+	}
 
+	usage, err := fetchUsageOnce()
+	if err != nil {
+		usageCache.mu.Lock()
+		usageCache.failures++
+		backoff := usageCacheTTL * time.Duration(1<<min(usageCache.failures, 4))
+		if backoff > usageMaxBackoff {
+			backoff = usageMaxBackoff
+		}
+		usageCache.nextTry = time.Now().Add(backoff)
+		usageCache.mu.Unlock()
+
+		if cached != nil {
+			return cached, nil
+		}
+		return nil, err
+	}
+
+	usageCache.mu.Lock()
+	usageCache.usage = usage
+	usageCache.fetched = time.Now()
+	usageCache.failures = 0
+	usageCache.nextTry = time.Time{}
+	usageCache.mu.Unlock()
+
+	return usage, nil
+}
+
+// fetchUsageOnce makes a single API call to get usage data.
+func fetchUsageOnce() (*Usage, error) {
 	token, err := getOAuthToken()
 	if err != nil {
-		if cached != nil {
-			return cached, nil // return stale cache on error
-		}
 		return nil, fmt.Errorf("no OAuth token: %w", err)
 	}
 
 	req, err := http.NewRequest("GET", "https://api.anthropic.com/api/oauth/usage", nil)
 	if err != nil {
-		if cached != nil {
-			return cached, nil
-		}
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -77,34 +114,19 @@ func FetchUsage() (*Usage, error) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		if cached != nil {
-			return cached, nil
-		}
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		if cached != nil {
-			return cached, nil // keep showing stale data on rate limit
-		}
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("usage API: %d %s", resp.StatusCode, string(body))
 	}
 
 	var usage Usage
 	if err := json.NewDecoder(resp.Body).Decode(&usage); err != nil {
-		if cached != nil {
-			return cached, nil
-		}
 		return nil, err
 	}
-
-	usageCache.mu.Lock()
-	usageCache.usage = &usage
-	usageCache.fetched = time.Now()
-	usageCache.mu.Unlock()
-
 	return &usage, nil
 }
 
