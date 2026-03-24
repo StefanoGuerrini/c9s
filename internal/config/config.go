@@ -27,10 +27,11 @@ type Config struct {
 
 // Dashboard persists the last-used dashboard toggle states.
 type Dashboard struct {
-	ShowTokens    bool   `json:"show_tokens"`
-	ShowPreview   bool   `json:"show_preview"`
-	ShowWorktrees bool   `json:"show_worktrees"`
-	GroupBy       int    `json:"group_by"`       // 0=none, 1=project, 2=status
+	ShowTokens       bool     `json:"show_tokens"`
+	ShowPreview      bool     `json:"show_preview"`
+	ShowWorktrees    bool     `json:"show_worktrees"`
+	GroupBy          int      `json:"group_by"`           // 0=none, 1=project, 2=status
+	ReplacedSessions []string `json:"replaced_sessions"`  // sessions hidden after fork/clear
 }
 
 // Keys defines tmux-level navigation keybindings.

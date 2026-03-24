@@ -11,6 +11,7 @@ import (
 func TestReconcileWindows_NewSession(t *testing.T) {
 	// New session tracked with tmpKey should be reconciled to real sessionID.
 	m := &model{
+		replacedSessions: make(map[string]bool),
 		managedWindows: map[string]managedWindow{
 			"new-123456": {
 				windowID:   "@1",
@@ -28,16 +29,9 @@ func TestReconcileWindows_NewSession(t *testing.T) {
 			FileMtime:   time.Now(),
 		},
 	}
-	procs := []claude.ClaudeProcess{
-		{PID: 100, SessionID: "", ProjectPath: "/home/user/project"},
-	}
 
-	getPanePID := func(windowID string) (int, error) { return 50, nil }
-	getChildPIDs := func(pid int) []int { return []int{100} }
+	m.reconcileWindows(sessions)
 
-	m.reconcileWindows(sessions, procs, getPanePID, getChildPIDs)
-
-	// Should be re-keyed from "new-123456" to "abc-def-123".
 	if _, ok := m.managedWindows["new-123456"]; ok {
 		t.Error("old tmpKey should be deleted")
 	}
@@ -54,10 +48,9 @@ func TestReconcileWindows_NewSession(t *testing.T) {
 }
 
 func TestReconcileWindows_Fork(t *testing.T) {
-	// After fork: old sessionID maps to window. Claude process still has
-	// --resume old-session-id in args, but old session JSONL is stale and
-	// new forked session JSONL is recently active.
+	// After fork: old session JSONL is stale, new forked session is active.
 	m := &model{
+		replacedSessions: make(map[string]bool),
 		managedWindows: map[string]managedWindow{
 			"old-session-id": {
 				windowID:   "@2",
@@ -80,17 +73,9 @@ func TestReconcileWindows_Fork(t *testing.T) {
 			FileMtime:   time.Now(), // recently active
 		},
 	}
-	// Process still shows --resume old-session-id (realistic fork behavior).
-	procs := []claude.ClaudeProcess{
-		{PID: 200, SessionID: "old-session-id", ProjectPath: "/home/user/project"},
-	}
 
-	getPanePID := func(windowID string) (int, error) { return 60, nil }
-	getChildPIDs := func(pid int) []int { return []int{200} }
+	m.reconcileWindows(sessions)
 
-	m.reconcileWindows(sessions, procs, getPanePID, getChildPIDs)
-
-	// Should be re-keyed from "old-session-id" to "forked-session-id".
 	if _, ok := m.managedWindows["old-session-id"]; ok {
 		t.Error("old sessionID key should be deleted")
 	}
@@ -101,47 +86,15 @@ func TestReconcileWindows_Fork(t *testing.T) {
 	if mw.sessionID != "forked-session-id" {
 		t.Errorf("sessionID = %q, want forked-session-id", mw.sessionID)
 	}
-}
-
-func TestReconcileWindows_ResumeMatch(t *testing.T) {
-	// Process has --resume flag pointing to an active session (not stale).
-	// tmpKey entry should be reconciled to that session.
-	m := &model{
-		managedWindows: map[string]managedWindow{
-			"new-999": {
-				windowID: "@3",
-				project:  "/home/user/project",
-			},
-		},
-	}
-
-	sessions := []claude.SessionInfo{
-		{
-			SessionID:   "resumed-id",
-			ProjectPath: "/home/user/project",
-			FileMtime:   time.Now(),
-		},
-	}
-	procs := []claude.ClaudeProcess{
-		{PID: 300, SessionID: "resumed-id", ProjectPath: "/home/user/project"},
-	}
-
-	getPanePID := func(windowID string) (int, error) { return 70, nil }
-	getChildPIDs := func(pid int) []int { return []int{300} }
-
-	m.reconcileWindows(sessions, procs, getPanePID, getChildPIDs)
-
-	if _, ok := m.managedWindows["new-999"]; ok {
-		t.Error("tmpKey should be deleted")
-	}
-	if _, ok := m.managedWindows["resumed-id"]; !ok {
-		t.Error("expected entry under resumed sessionID")
+	if !m.replacedSessions["old-session-id"] {
+		t.Error("old-session-id should be in replacedSessions")
 	}
 }
 
 func TestReconcileWindows_ActiveSessionSkipped(t *testing.T) {
 	// If current sessionID is valid and recently active, don't reconcile.
 	m := &model{
+		replacedSessions: make(map[string]bool),
 		managedWindows: map[string]managedWindow{
 			"active-id": {
 				windowID:  "@4",
@@ -155,31 +108,27 @@ func TestReconcileWindows_ActiveSessionSkipped(t *testing.T) {
 		{
 			SessionID:   "active-id",
 			ProjectPath: "/home/user/project",
-			FileMtime:   time.Now(), // recently active
+			FileMtime:   time.Now(),
+		},
+		{
+			SessionID:   "other-id",
+			ProjectPath: "/home/user/project",
+			FileMtime:   time.Now().Add(-10 * time.Second),
 		},
 	}
 
-	callCount := 0
-	getPanePID := func(windowID string) (int, error) {
-		callCount++
-		return 80, nil
-	}
-	getChildPIDs := func(pid int) []int { return nil }
+	m.reconcileWindows(sessions)
 
-	m.reconcileWindows(sessions, nilProcs(), getPanePID, getChildPIDs)
-
-	// GetPanePID should NOT be called since active session is skipped.
-	if callCount != 0 {
-		t.Errorf("getPanePID called %d times, expected 0 (should skip active sessions)", callCount)
-	}
+	// Should remain under active-id since it's not stale.
 	if _, ok := m.managedWindows["active-id"]; !ok {
 		t.Error("active session should remain in map")
 	}
 }
 
-func TestReconcileWindows_AmbiguousProject(t *testing.T) {
+func TestReconcileWindows_PicksMostRecent(t *testing.T) {
 	// Multiple active sessions in same project — should pick the most recent.
 	m := &model{
+		replacedSessions: make(map[string]bool),
 		managedWindows: map[string]managedWindow{
 			"old-id": {
 				windowID:  "@5",
@@ -199,7 +148,7 @@ func TestReconcileWindows_AmbiguousProject(t *testing.T) {
 		{
 			SessionID:   "session-a",
 			ProjectPath: "/home/user/project",
-			FileMtime:   now.Add(-10 * time.Second), // recent
+			FileMtime:   now.Add(-10 * time.Second),
 		},
 		{
 			SessionID:   "session-b",
@@ -207,16 +156,9 @@ func TestReconcileWindows_AmbiguousProject(t *testing.T) {
 			FileMtime:   now.Add(-2 * time.Second), // most recent
 		},
 	}
-	procs := []claude.ClaudeProcess{
-		{PID: 400, SessionID: "old-id", ProjectPath: "/home/user/project"},
-	}
 
-	getPanePID := func(windowID string) (int, error) { return 90, nil }
-	getChildPIDs := func(pid int) []int { return []int{400} }
+	m.reconcileWindows(sessions)
 
-	m.reconcileWindows(sessions, procs, getPanePID, getChildPIDs)
-
-	// Should pick the most recently active session.
 	if _, ok := m.managedWindows["old-id"]; ok {
 		t.Error("old entry should be deleted")
 	}
@@ -225,9 +167,10 @@ func TestReconcileWindows_AmbiguousProject(t *testing.T) {
 	}
 }
 
-func TestReconcileWindows_NoChildPIDs(t *testing.T) {
-	// If no child PIDs found (process exited), entry should remain unchanged.
+func TestReconcileWindows_NoNewSession(t *testing.T) {
+	// If no recent session in the project, entry should remain unchanged.
 	m := &model{
+		replacedSessions: make(map[string]bool),
 		managedWindows: map[string]managedWindow{
 			"stale-id": {
 				windowID:  "@6",
@@ -245,16 +188,9 @@ func TestReconcileWindows_NoChildPIDs(t *testing.T) {
 		},
 	}
 
-	getPanePID := func(windowID string) (int, error) { return 100, nil }
-	getChildPIDs := func(pid int) []int { return nil } // no children
-
-	m.reconcileWindows(sessions, nil, getPanePID, getChildPIDs)
+	m.reconcileWindows(sessions)
 
 	if _, ok := m.managedWindows["stale-id"]; !ok {
-		t.Error("entry should remain when no child PIDs found")
+		t.Error("entry should remain when no new session found")
 	}
-}
-
-func nilProcs() []claude.ClaudeProcess {
-	return nil
 }

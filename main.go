@@ -127,8 +127,9 @@ type model struct {
 	showPreview  bool      // show session preview panel
 
 	// tmux
-	insideTmux     bool // running inside tmux as dashboard
-	managedWindows map[string]managedWindow // sessionID → window
+	insideTmux         bool // running inside tmux as dashboard
+	managedWindows     map[string]managedWindow // sessionID → window
+	replacedSessions   map[string]bool          // sessions replaced by fork/clear, hidden from dashboard
 
 	// Rename
 	renaming      bool
@@ -186,6 +187,7 @@ func initialModel(sessions []claude.SessionInfo, err error, insideTmux bool) mod
 		configInput:       ci,
 		insideTmux:        insideTmux,
 		managedWindows:    make(map[string]managedWindow),
+		replacedSessions:  loadReplacedSessions(),
 		expandedWorktrees: make(map[int]bool),
 		worktreeCache:     make(map[string][]git.Worktree),
 		showTokens:        cfg.Dashboard.ShowTokens,
@@ -234,8 +236,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reconcile managed windows with actual running sessions.
 		// Handles new sessions (tmpKey) and forked sessions (stale sessionID).
 		if m.insideTmux && len(m.managedWindows) > 0 {
-			procs := claude.ListClaudeProcesses()
-			m.reconcileWindows(m.sessions, procs, tmux.GetPanePID, claude.ChildPIDs)
+			prevReplaced := len(m.replacedSessions)
+			m.reconcileWindows(m.sessions)
+			if len(m.replacedSessions) > prevReplaced {
+				m.saveDashboardState()
+			}
 		}
 
 		// Update pane statuses for managed windows.
@@ -618,21 +623,11 @@ func (m *model) getWorktrees(dir string) []git.Worktree {
 // 2. Forked sessions (/fork): old sessionID in map, new session running in window
 //
 // For forks, the claude process keeps the old --resume arg, so we can't trust
-// process args alone. When the tracked session's JSONL is stale, we look for
-// the most recently active session in the same project directory.
-func (m *model) reconcileWindows(
-	sessions []claude.SessionInfo,
-	procs []claude.ClaudeProcess,
-	getPanePID func(string) (int, error),
-	getChildPIDs func(int) []int,
-) {
-	// Build PID → process lookup.
-	pidToProc := make(map[int]claude.ClaudeProcess)
-	for _, p := range procs {
-		pidToProc[p.PID] = p
-	}
-
-	// Build sessionID → session lookup for mtime checks.
+// When a managed window's tracked session goes stale (JSONL not written recently),
+// find the most recently active session in the same project and re-key.
+// This handles /clear (new session ID) and /fork (new session with context).
+func (m *model) reconcileWindows(sessions []claude.SessionInfo) {
+	// Build sessionID → session lookup.
 	sessionByID := make(map[string]*claude.SessionInfo)
 	for i := range sessions {
 		sessionByID[sessions[i].SessionID] = &sessions[i]
@@ -642,95 +637,87 @@ func (m *model) reconcileWindows(
 	toAdd := map[string]managedWindow{}
 
 	for key, mw := range m.managedWindows {
-		// Determine if the current session is stale (JSONL not written recently).
-		currentStale := true
+		project := mw.project
+		if project == "" {
+			continue
+		}
+
+		// Get the tracked session's mtime (if it exists).
+		var trackedMtime time.Time
 		if mw.sessionID != "" {
 			if s, ok := sessionByID[mw.sessionID]; ok {
-				if !s.FileMtime.IsZero() && time.Since(s.FileMtime) < 30*time.Second {
-					currentStale = false
-				}
+				trackedMtime = s.FileMtime
 			}
 		}
 
-		// If current session is active and healthy, skip reconciliation.
-		if !currentStale {
-			continue
-		}
-
-		// Get the pane PID for this tmux window.
-		panePID, err := getPanePID(mw.windowID)
-		if err != nil {
-			continue
-		}
-
-		// Find claude process children of the pane shell.
-		childPIDs := getChildPIDs(panePID)
-
-		var matchedSessionID string
-		var matchedProject string
-		for _, cpid := range childPIDs {
-			if proc, ok := pidToProc[cpid]; ok {
-				matchedProject = proc.ProjectPath
-				// Only trust --resume if the session it points to is active.
-				// After a fork, the process still has --resume old-id but
-				// the old session's JSONL is stale.
-				if proc.SessionID != "" && proc.SessionID != mw.sessionID {
-					if s, ok := sessionByID[proc.SessionID]; ok {
-						if !s.FileMtime.IsZero() && time.Since(s.FileMtime) < 30*time.Second {
-							matchedSessionID = proc.SessionID
-							break
-						}
-					}
-				}
-				break
+		// Find the most recently active session in the same project
+		// that is NEWER than the tracked session.
+		var bestID string
+		var bestMtime time.Time
+		for _, s := range sessions {
+			if s.ProjectPath != project {
+				continue
+			}
+			if s.SessionID == mw.sessionID {
+				continue
+			}
+			if s.FileMtime.IsZero() {
+				continue
+			}
+			// Must be recent (< 60s) AND newer than the tracked session.
+			if time.Since(s.FileMtime) < 60*time.Second &&
+				s.FileMtime.After(trackedMtime) &&
+				s.FileMtime.After(bestMtime) {
+				bestID = s.SessionID
+				bestMtime = s.FileMtime
 			}
 		}
 
-		// Fallback: find the most recently active session in the same project.
-		// This handles forks (new session in same project, same process).
-		if matchedSessionID == "" {
-			project := matchedProject
-			if project == "" {
-				project = mw.project
-			}
-			if project != "" {
-				var bestID string
-				var bestMtime time.Time
-				for _, s := range sessions {
-					if s.ProjectPath == project &&
-						s.SessionID != mw.sessionID &&
-						!s.FileMtime.IsZero() &&
-						time.Since(s.FileMtime) < 30*time.Second &&
-						s.FileMtime.After(bestMtime) {
-						bestID = s.SessionID
-						bestMtime = s.FileMtime
-					}
-				}
-				matchedSessionID = bestID
-			}
-		}
-
-		if matchedSessionID == "" || matchedSessionID == key {
+		if bestID == "" || bestID == key {
 			continue
 		}
 
 		// Re-key: remove old entry, add under new sessionID.
 		toDelete = append(toDelete, key)
-		newMW := managedWindow{
+		toAdd[bestID] = managedWindow{
 			windowID:   mw.windowID,
-			sessionID:  matchedSessionID,
+			sessionID:  bestID,
 			project:    mw.project,
 			paneStatus: mw.paneStatus,
 		}
-		toAdd[matchedSessionID] = newMW
 
-		// Rename the tmux window to reflect the new session.
-		if s, ok := sessionByID[matchedSessionID]; ok {
-			name := s.DisplayName()
-			if len(name) > 30 {
-				name = name[:30]
+		// Determine if this is a fork or a clear.
+		// Fork: new session has content (summary/prompt). Clear: blank session.
+		isFork := false
+		if newSession, ok := sessionByID[bestID]; ok {
+			isFork = newSession.Summary != "" || newSession.FirstPrompt != ""
+		}
+
+		if mw.sessionID != "" && !strings.HasPrefix(key, "new-") {
+			if isFork {
+				// Fork: keep old session visible, name new one "<name> fork".
+				// Only rename if the new session doesn't already have a custom title.
+				if oldSession, ok := sessionByID[mw.sessionID]; ok {
+					if newSession, ok := sessionByID[bestID]; ok && newSession.CustomTitle == "" {
+						oldName := oldSession.DisplayName()
+						if oldName != "" {
+							claude.RenameSession(newSession.Dir, bestID, oldName+" fork")
+						}
+					}
+				}
+			} else {
+				// Clear: hide old session, carry over the name.
+				// Only rename if the new session doesn't already have a custom title.
+				m.replacedSessions[key] = true
+				if oldSession, ok := sessionByID[mw.sessionID]; ok {
+					if newSession, ok := sessionByID[bestID]; ok && newSession.CustomTitle == "" {
+						oldName := oldSession.DisplayName()
+						if oldName != "" {
+							claude.RenameSession(newSession.Dir, bestID, oldName)
+						}
+					}
+				}
 			}
-			tmux.RenameWindow(mw.windowID, name)
 		}
 	}
 
@@ -745,12 +732,34 @@ func (m *model) reconcileWindows(
 // saveDashboardState persists toggle states to config so they survive restarts.
 func (m model) saveDashboardState() {
 	cfg.Dashboard = config.Dashboard{
-		ShowTokens:    m.showTokens,
-		ShowPreview:   m.showPreview,
-		ShowWorktrees: m.showWorktrees,
-		GroupBy:       int(m.groupBy),
+		ShowTokens:       m.showTokens,
+		ShowPreview:      m.showPreview,
+		ShowWorktrees:    m.showWorktrees,
+		GroupBy:          int(m.groupBy),
+		ReplacedSessions: m.replacedSessionsList(),
 	}
 	config.Save(cfg)
+}
+
+// loadReplacedSessions loads the replaced sessions set from persisted config.
+func loadReplacedSessions() map[string]bool {
+	m := make(map[string]bool)
+	for _, id := range cfg.Dashboard.ReplacedSessions {
+		m[id] = true
+	}
+	return m
+}
+
+// replacedSessionsList converts the map to a slice for persistence.
+func (m model) replacedSessionsList() []string {
+	if len(m.replacedSessions) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m.replacedSessions))
+	for id := range m.replacedSessions {
+		out = append(out, id)
+	}
+	return out
 }
 
 // enterConfigScreen switches to the in-app config editor.
@@ -1548,12 +1557,17 @@ func (m model) footer() string {
 
 // filtered returns sessions matching the current search filter.
 func (m model) filtered() []claude.SessionInfo {
-	if m.filter == "" {
-		return m.sessions
-	}
-	f := strings.ToLower(m.filter)
 	var out []claude.SessionInfo
+	f := strings.ToLower(m.filter)
 	for _, s := range m.sessions {
+		// Hide sessions that were replaced by fork/clear.
+		if m.replacedSessions[s.SessionID] {
+			continue
+		}
+		if m.filter == "" {
+			out = append(out, s)
+			continue
+		}
 		if strings.Contains(strings.ToLower(s.DisplayName()), f) ||
 			strings.Contains(strings.ToLower(s.ProjectPath), f) ||
 			strings.Contains(strings.ToLower(s.SessionID), f) ||
