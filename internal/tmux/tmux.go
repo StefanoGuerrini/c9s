@@ -90,7 +90,7 @@ func NewWindow(name, shellCmd, workDir string) (string, error) {
 		shellCmd, SessionName, DashboardWindow,
 	)
 
-	args := []string{"new-window", "-t", SessionName, "-n", name, "-P", "-F", "#{window_id}"}
+	args := []string{"new-window", "-a", "-t", SessionName, "-n", name, "-P", "-F", "#{window_id}"}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
