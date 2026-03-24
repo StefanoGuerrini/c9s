@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/stefanoguerrini/c9s/internal/claude"
 	"github.com/stefanoguerrini/c9s/internal/config"
@@ -196,15 +196,13 @@ func initialModel(sessions []claude.SessionInfo, err error, insideTmux bool) mod
 }
 
 func (m model) Init() tea.Cmd {
-	var cmds []tea.Cmd
-	cmds = append(cmds, tea.ClearScreen)
-	cmds = append(cmds, tea.Tick(refreshInterval(), func(t time.Time) tea.Msg {
+	cmd := tea.Tick(refreshInterval(), func(t time.Time) tea.Msg {
 		return tickMsg(t)
-	}))
+	})
 	if m.insideTmux {
 		tmux.SetupNavigationKeys(navKeys())
 	}
-	return tea.Batch(cmds...)
+	return cmd
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -283,7 +281,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clearStatusMsg:
 		m.statusText = ""
 		return m, nil
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if m.configScreen {
 			return m.updateConfig(msg)
 		}
@@ -301,7 +299,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) updateSearch(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.searching = false
@@ -330,7 +328,7 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	items := m.items()
 	switch msg.String() {
 	case "q", "ctrl+c":
@@ -574,7 +572,7 @@ func (m model) startEffortPicker(items []displayItem) (tea.Model, tea.Cmd) {
 }
 
 // updateEffortPicker handles key input during effort selection.
-func (m model) updateEffortPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) updateEffortPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	efforts := map[string]string{
 		"1": "low",
 		"2": "medium",
@@ -789,14 +787,14 @@ func (m model) configVisibleItems() []configDisplayItem {
 }
 
 // updateConfig handles all key input on the config screen.
-func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) updateConfig(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.configEditing {
 		return m.updateConfigEdit(msg)
 	}
 	return m.updateConfigNav(msg)
 }
 
-func (m model) updateConfigNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) updateConfigNav(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	items := m.configVisibleItems()
 	switch msg.String() {
 	case "q", "esc":
@@ -819,7 +817,7 @@ func (m model) updateConfigNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.configCursor++
 			m.skipConfigHeaders(items, 1)
 		}
-	case "enter", " ":
+	case "enter", "space":
 		if m.configCursor >= 0 && m.configCursor < len(items) && !items[m.configCursor].isHeader {
 			f := m.configFields[items[m.configCursor].fieldIdx]
 			if len(f.Options) > 0 {
@@ -847,7 +845,7 @@ func (m model) updateConfigNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) updateConfigEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) updateConfigEdit(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		f := m.configFields[m.configEditIdx]
@@ -1091,7 +1089,7 @@ func (m model) startRename(items []displayItem) (tea.Model, tea.Cmd) {
 }
 
 // updateRename handles keypresses while in rename mode.
-func (m model) updateRename(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) updateRename(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.renaming = false
@@ -1188,15 +1186,21 @@ func (m model) tableWidth() int {
 	return m.width - pw - 1 // 1 for gap
 }
 
-func (m model) View() string {
+func altView(s string) tea.View {
+	v := tea.NewView(s)
+	v.AltScreen = true
+	return v
+}
+
+func (m model) View() tea.View {
 	if m.width == 0 {
-		return "Loading..."
+		return altView("Loading...")
 	}
 	if m.configScreen {
-		return m.configView()
+		return altView(m.configView())
 	}
 	if m.err != nil {
-		return fmt.Sprintf("Error: %v\n\nPress q to quit.", m.err)
+		return altView(fmt.Sprintf("Error: %v\n\nPress q to quit.", m.err))
 	}
 
 	var b strings.Builder
@@ -1224,7 +1228,7 @@ func (m model) View() string {
 		}
 		b.WriteString("\n")
 		b.WriteString(m.footer())
-		return b.String()
+		return altView(b.String())
 	}
 
 	// Build table lines.
@@ -1329,7 +1333,7 @@ func (m model) View() string {
 		out += "\n"
 		lines++
 	}
-	return out
+	return altView(out)
 }
 
 // renderPreview renders the session preview panel.
@@ -2001,7 +2005,7 @@ func main() {
 			}
 		}
 	}
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
