@@ -75,34 +75,44 @@ func TestEditableFields(t *testing.T) {
 	if fields[4].Key != "status_usage" {
 		t.Errorf("field[4].Key = %q, want status_usage", fields[4].Key)
 	}
-	if len(fields[4].Options) != 5 {
-		t.Errorf("status_usage Options = %v, want 5 options", fields[4].Options)
+	if len(fields[4].Options) != 7 {
+		t.Errorf("status_usage Options = %v, want 7 options", fields[4].Options)
 	}
 
-	// Sixth and seventh are worktree fields (Worktrees section).
-	if fields[5].Key != "worktrees" {
-		t.Errorf("field[5].Key = %q, want worktrees", fields[5].Key)
+	// 6-8 are cost estimation fields (Cost estimation section).
+	for i, key := range []string{"cost_input", "cost_output", "cost_cache"} {
+		if fields[i+5].Key != key {
+			t.Errorf("field[%d].Key = %q, want %q", i+5, fields[i+5].Key, key)
+		}
+		if fields[i+5].Section != "Cost estimation" {
+			t.Errorf("field[%d].Section = %q, want Cost estimation", i+5, fields[i+5].Section)
+		}
 	}
-	if fields[5].Section != "Worktrees (beta)" {
-		t.Errorf("field[5].Section = %q, want Worktrees (beta)", fields[5].Section)
+
+	// 9th and 10th are worktree fields (Worktrees section).
+	if fields[8].Key != "worktrees" {
+		t.Errorf("field[8].Key = %q, want worktrees", fields[8].Key)
 	}
-	if fields[6].Key != "worktree_expand" {
-		t.Errorf("field[6].Key = %q, want worktree_expand", fields[6].Key)
+	if fields[8].Section != "Worktrees (beta)" {
+		t.Errorf("field[8].Section = %q, want Worktrees (beta)", fields[8].Section)
+	}
+	if fields[9].Key != "worktree_expand" {
+		t.Errorf("field[9].Key = %q, want worktree_expand", fields[9].Key)
 	}
 
 	// Next 3 should be shortcuts.
 	for i, key := range []string{"dashboard", "next_session", "prev_session"} {
-		if fields[i+7].Key != key {
-			t.Errorf("field[%d].Key = %q, want %q", i+7, fields[i+7].Key, key)
+		if fields[i+10].Key != key {
+			t.Errorf("field[%d].Key = %q, want %q", i+10, fields[i+10].Key, key)
 		}
-		if fields[i+7].Section != "Shortcuts" {
-			t.Errorf("field[%d].Section = %q, want Shortcuts", i+7, fields[i+7].Section)
+		if fields[i+10].Section != "Shortcuts" {
+			t.Errorf("field[%d].Section = %q, want Shortcuts", i+10, fields[i+10].Section)
 		}
 	}
 
-	// 11th should be theme toggle.
-	if fields[10].Key != "theme" {
-		t.Errorf("field[10].Key = %q, want theme", fields[10].Key)
+	// 14th should be theme toggle.
+	if fields[13].Key != "theme" {
+		t.Errorf("field[13].Key = %q, want theme", fields[13].Key)
 	}
 
 	// Test Get/Set roundtrip on refresh field.

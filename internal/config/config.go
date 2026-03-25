@@ -17,8 +17,11 @@ type Config struct {
 	ScrollSpeed    int    `json:"scroll_speed"`     // lines per mouse scroll event (default: 3)
 	WorkDir        string `json:"work_dir"`         // default working directory for new sessions (empty = cwd)
 	KeepAlive      string `json:"keep_alive"`       // "off" (default) or "on" — keep sessions running on quit
-	StatusUsage    string `json:"status_usage"`     // "off", "percent" (default), "tokens", "cost", "all"
-	Worktrees      string `json:"worktrees"`        // "off" (default), "auto", "always"
+	StatusUsage    string  `json:"status_usage"`     // "off", "percent" (default), "cost,percent", "all", etc.
+	CostInput      float64 `json:"cost_input"`      // $/M input+cache_write tokens (default: 3.0 = Sonnet)
+	CostOutput     float64 `json:"cost_output"`     // $/M output tokens (default: 15.0 = Sonnet)
+	CostCache      float64 `json:"cost_cache"`      // $/M cache read tokens (default: 0.30 = Sonnet)
+	Worktrees      string  `json:"worktrees"`       // "off" (default), "auto", "always"
 	WorktreeExpand string `json:"worktree_expand"`  // "all" (default), "selected"
 	Keys           Keys   `json:"keys"`
 	Colors         Colors `json:"colors"`
@@ -87,6 +90,9 @@ func Default() Config {
 		ScrollSpeed:    3,
 		KeepAlive:      "off",
 		StatusUsage:    "percent",
+		CostInput:      3.0,
+		CostOutput:     15.0,
+		CostCache:      0.30,
 		Worktrees:      "off",
 		WorktreeExpand: "all",
 		Keys: Keys{
@@ -183,13 +189,35 @@ func EditableFields() []Field {
 				}
 			}},
 		{Section: "General", Label: "Status bar usage", Key: "status_usage",
-			Desc:    "What to show in tmux status bar: token count, % of budget, estimated cost, or all",
-			Options: []string{"off", "percent", "tokens", "cost", "all"},
+			Desc:    "What to show in tmux status bar. Comma-separated: tokens, cost, percent, or all",
+			Options: []string{"off", "percent", "cost", "cost,percent", "tokens", "tokens,cost", "all"},
 			Get:     func(c Config) string { return c.StatusUsage },
 			Set: func(c *Config, v string) {
-				switch v {
-				case "off", "percent", "tokens", "cost", "all":
-					c.StatusUsage = v
+				c.StatusUsage = v
+			}},
+		// Cost estimation
+		{Section: "Cost estimation", Label: "$/M input", Key: "cost_input",
+			Desc:    "$/M for input + cache write tokens. Sonnet: 3, Opus: 15, Haiku: 0.25",
+			Get:     func(c Config) string { return strconv.FormatFloat(c.CostInput, 'f', -1, 64) },
+			Set: func(c *Config, v string) {
+				if n, err := strconv.ParseFloat(v, 64); err == nil && n >= 0 {
+					c.CostInput = n
+				}
+			}},
+		{Section: "Cost estimation", Label: "$/M output", Key: "cost_output",
+			Desc:    "$/M for output tokens. Sonnet: 15, Opus: 75, Haiku: 1.25",
+			Get:     func(c Config) string { return strconv.FormatFloat(c.CostOutput, 'f', -1, 64) },
+			Set: func(c *Config, v string) {
+				if n, err := strconv.ParseFloat(v, 64); err == nil && n >= 0 {
+					c.CostOutput = n
+				}
+			}},
+		{Section: "Cost estimation", Label: "$/M cache", Key: "cost_cache",
+			Desc:    "$/M for cache read tokens. Sonnet: 0.30, Opus: 1.50, Haiku: 0.025",
+			Get:     func(c Config) string { return strconv.FormatFloat(c.CostCache, 'f', -1, 64) },
+			Set: func(c *Config, v string) {
+				if n, err := strconv.ParseFloat(v, 64); err == nil && n >= 0 {
+					c.CostCache = n
 				}
 			}},
 		// Worktrees (beta)

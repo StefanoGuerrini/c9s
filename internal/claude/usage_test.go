@@ -27,26 +27,22 @@ func TestFetchUsage_CachesResult(t *testing.T) {
 	defer srv.Close()
 
 	resetUsageCache()
-	// Pre-set token so getOAuthToken doesn't fail.
 	usageCache.mu.Lock()
 	usageCache.token = "test-token"
-	usageCache.mu.Unlock()
-
-	// Patch the URL by using fetchUsageOnce directly won't work,
-	// so test via the cache behavior instead.
-	// Simulate a successful fetch by setting cache directly.
-	usageCache.mu.Lock()
 	usageCache.usage = &Usage{FiveHour: UsageWindow{Utilization: 42.5}}
 	usageCache.fetched = time.Now()
 	usageCache.mu.Unlock()
 
 	// Should return cached result without calling API.
-	usage, err := FetchUsage()
+	result, err := FetchUsage()
 	if err != nil {
 		t.Fatalf("FetchUsage() error: %v", err)
 	}
-	if usage.FiveHour.Utilization != 42.5 {
-		t.Errorf("utilization = %v, want 42.5", usage.FiveHour.Utilization)
+	if result.Usage.FiveHour.Utilization != 42.5 {
+		t.Errorf("utilization = %v, want 42.5", result.Usage.FiveHour.Utilization)
+	}
+	if result.Stale {
+		t.Error("fresh cache should not be stale")
 	}
 }
 
@@ -62,12 +58,15 @@ func TestFetchUsage_BackoffOnFailure(t *testing.T) {
 	usageCache.mu.Unlock()
 
 	// Should return stale cache because we're in backoff period.
-	usage, err := FetchUsage()
+	result, err := FetchUsage()
 	if err != nil {
 		t.Fatalf("FetchUsage() error during backoff: %v", err)
 	}
-	if usage.FiveHour.Utilization != 30.0 {
-		t.Errorf("utilization = %v, want 30.0 (stale cache)", usage.FiveHour.Utilization)
+	if result.Usage.FiveHour.Utilization != 30.0 {
+		t.Errorf("utilization = %v, want 30.0 (stale cache)", result.Usage.FiveHour.Utilization)
+	}
+	if !result.Stale {
+		t.Error("backoff cache should be marked stale")
 	}
 }
 
@@ -124,14 +123,7 @@ func TestFetchUsage_BackoffSchedule(t *testing.T) {
 func TestFetchUsage_ResetOnSuccess(t *testing.T) {
 	resetUsageCache()
 
-	// Set up failure state.
-	usageCache.mu.Lock()
-	usageCache.failures = 3
-	usageCache.nextTry = time.Now().Add(-1 * time.Second) // backoff expired
-	usageCache.token = "test-token"
-	usageCache.mu.Unlock()
-
-	// Simulate successful fetch.
+	// Simulate successful fetch by populating cache directly.
 	usageCache.mu.Lock()
 	usageCache.usage = &Usage{FiveHour: UsageWindow{Utilization: 50.0}}
 	usageCache.fetched = time.Now()
@@ -139,12 +131,15 @@ func TestFetchUsage_ResetOnSuccess(t *testing.T) {
 	usageCache.nextTry = time.Time{}
 	usageCache.mu.Unlock()
 
-	usage, err := FetchUsage()
+	result, err := FetchUsage()
 	if err != nil {
 		t.Fatalf("FetchUsage() error: %v", err)
 	}
-	if usage.FiveHour.Utilization != 50.0 {
-		t.Errorf("utilization = %v, want 50.0", usage.FiveHour.Utilization)
+	if result.Usage.FiveHour.Utilization != 50.0 {
+		t.Errorf("utilization = %v, want 50.0", result.Usage.FiveHour.Utilization)
+	}
+	if result.Stale {
+		t.Error("fresh result should not be stale")
 	}
 
 	usageCache.mu.Lock()
@@ -172,11 +167,11 @@ func TestFetchUsage_Concurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			usage, err := FetchUsage()
+			result, err := FetchUsage()
 			if err != nil {
 				t.Errorf("concurrent FetchUsage() error: %v", err)
 			}
-			if usage == nil {
+			if result == nil || result.Usage == nil {
 				t.Error("concurrent FetchUsage() returned nil")
 			}
 		}()

@@ -107,8 +107,9 @@ func NewWindow(name, shellCmd, workDir string) (string, error) {
 }
 
 // SetWindowEnv sets a per-window tmux user option (accessible in format strings as #{@key}).
+// Uses set-window-option so each window has its own value (set-option would set session-level).
 func SetWindowEnv(windowID, key, value string) {
-	exec.Command("tmux", "set-option", "-t", windowID, "@"+key, value).Run()
+	exec.Command("tmux", "set-window-option", "-t", windowID, "@"+key, value).Run()
 }
 
 // SelectWindow switches to the given window in the c9s session.

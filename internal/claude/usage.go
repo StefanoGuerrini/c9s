@@ -50,10 +50,17 @@ const (
 	usageMaxBackoff = 30 * time.Minute
 )
 
+// UsageResult wraps usage data with metadata about freshness.
+type UsageResult struct {
+	Usage *Usage
+	Stale bool // true when returning cached data after a failed refresh
+}
+
 // FetchUsage returns the current account usage from Anthropic's OAuth API.
 // Results are cached for 5 minutes. On repeated failures, backs off
 // exponentially up to 30 minutes before retrying.
-func FetchUsage() (*Usage, error) {
+// The Stale flag indicates when the result comes from cache after a failed refresh.
+func FetchUsage() (*UsageResult, error) {
 	usageCache.mu.Lock()
 	cached := usageCache.usage
 	fresh := cached != nil && time.Since(usageCache.fetched) < usageCacheTTL
@@ -61,11 +68,11 @@ func FetchUsage() (*Usage, error) {
 	usageCache.mu.Unlock()
 
 	if fresh {
-		return cached, nil
+		return &UsageResult{Usage: cached, Stale: false}, nil
 	}
 	if tooSoon {
 		if cached != nil {
-			return cached, nil
+			return &UsageResult{Usage: cached, Stale: true}, nil
 		}
 		return nil, fmt.Errorf("usage API: backing off after repeated failures")
 	}
@@ -82,7 +89,7 @@ func FetchUsage() (*Usage, error) {
 		usageCache.mu.Unlock()
 
 		if cached != nil {
-			return cached, nil
+			return &UsageResult{Usage: cached, Stale: true}, nil
 		}
 		return nil, err
 	}
@@ -94,7 +101,7 @@ func FetchUsage() (*Usage, error) {
 	usageCache.nextTry = time.Time{}
 	usageCache.mu.Unlock()
 
-	return usage, nil
+	return &UsageResult{Usage: usage, Stale: false}, nil
 }
 
 // fetchUsageOnce makes a single API call to get usage data.

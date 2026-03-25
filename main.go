@@ -1884,6 +1884,20 @@ func fmtModified(t time.Time) string {
 	}
 }
 
+// usageHas returns true if the status_usage config includes the given component.
+// Supports "all" as shorthand for all components, and comma-separated values.
+func usageHas(component string) bool {
+	if cfg.StatusUsage == "all" {
+		return true
+	}
+	for _, s := range strings.Split(cfg.StatusUsage, ",") {
+		if strings.TrimSpace(s) == component {
+			return true
+		}
+	}
+	return false
+}
+
 // formatUsage builds the usage string for the tmux status bar based on config.
 func formatUsage(s claude.SessionInfo) string {
 	if cfg.StatusUsage == "off" {
@@ -1894,40 +1908,63 @@ func formatUsage(s claude.SessionInfo) string {
 		return ""
 	}
 
-	// Get real usage percentage from Anthropic API (cached 30s).
+	// Get real usage percentage from Anthropic API (cached 5min).
 	var apiPercent string
-	if cfg.StatusUsage == "percent" || cfg.StatusUsage == "all" {
-		if usage, err := claude.FetchUsage(); err == nil {
-			apiPercent = fmt.Sprintf("%.0f%%", usage.FiveHour.Utilization)
+	var resetStr string
+	if usageHas("percent") {
+		if result, err := claude.FetchUsage(); err == nil {
+			pct := fmt.Sprintf("%.0f%%", result.Usage.FiveHour.Utilization)
+			if result.Stale {
+				pct += "?"
+			}
+			apiPercent = pct
+			resetStr = fmtResetTime(result.Usage.FiveHour.ResetsAt)
 		}
 	}
 
 	var parts []string
-	switch cfg.StatusUsage {
-	case "tokens":
+	if usageHas("tokens") {
 		parts = append(parts, fmtTokens(budgetTokens))
-	case "percent":
-		if apiPercent != "" {
-			parts = append(parts, apiPercent)
-		}
-	case "cost":
+	}
+	if usageHas("cost") {
 		parts = append(parts, fmt.Sprintf("~$%.2f", estimateCost(s)))
-	case "all":
-		parts = append(parts, fmtTokens(budgetTokens))
-		if apiPercent != "" {
-			parts = append(parts, apiPercent)
+	}
+	if apiPercent != "" {
+		if resetStr != "" {
+			apiPercent += " " + resetStr
 		}
-		parts = append(parts, fmt.Sprintf("~$%.2f", estimateCost(s)))
+		parts = append(parts, apiPercent)
 	}
 	return strings.Join(parts, " · ")
 }
 
+// fmtResetTime parses an RFC3339 reset time and returns a human-friendly duration.
+func fmtResetTime(resetsAt string) string {
+	if resetsAt == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, resetsAt)
+	if err != nil {
+		return ""
+	}
+	d := time.Until(t)
+	if d <= 0 {
+		return ""
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	if h > 0 {
+		return fmt.Sprintf("resets %dh%02dm", h, m)
+	}
+	return fmt.Sprintf("resets %dm", m)
+}
+
 // estimateCost returns the estimated API-equivalent cost for a session.
-// Uses Sonnet pricing: $3/M input, $15/M output, $0.30/M cache read.
+// cost = (input + cache_write) * cost_input/M + output * cost_output/M + cache_read * cost_cache/M
 func estimateCost(s claude.SessionInfo) float64 {
-	inputCost := float64(s.InputTokens+s.CacheCreate) / 1_000_000 * 3.0
-	outputCost := float64(s.OutputTokens) / 1_000_000 * 15.0
-	cacheCost := float64(s.CacheRead) / 1_000_000 * 0.30
+	inputCost := float64(s.InputTokens+s.CacheCreate) / 1_000_000 * cfg.CostInput
+	outputCost := float64(s.OutputTokens) / 1_000_000 * cfg.CostOutput
+	cacheCost := float64(s.CacheRead) / 1_000_000 * cfg.CostCache
 	return inputCost + outputCost + cacheCost
 }
 

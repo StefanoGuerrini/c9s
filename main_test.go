@@ -194,3 +194,26 @@ func TestReconcileWindows_NoNewSession(t *testing.T) {
 		t.Error("entry should remain when no new session found")
 	}
 }
+
+func TestFmtResetTime(t *testing.T) {
+	tests := []struct {
+		name     string
+		resetsAt string
+		want     string
+	}{
+		{"empty", "", ""},
+		{"invalid", "not-a-date", ""},
+		{"past", time.Now().Add(-1 * time.Hour).Format(time.RFC3339), ""},
+		{"2h13m", time.Now().Add(2*time.Hour + 13*time.Minute + 30*time.Second).Format(time.RFC3339), "resets 2h13m"},
+		{"45m", time.Now().Add(45*time.Minute + 20*time.Second).Format(time.RFC3339), "resets 45m"},
+		{"5h00m", time.Now().Add(5*time.Hour + 10*time.Second).Format(time.RFC3339), "resets 5h00m"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := fmtResetTime(tt.resetsAt)
+			if got != tt.want {
+				t.Errorf("fmtResetTime(%q) = %q, want %q", tt.resetsAt, got, tt.want)
+			}
+		})
+	}
+}
