@@ -8,7 +8,7 @@ Terminal dashboard for Claude Code.
 
 ![c9s dashboard](docs/dashboard.png)
 
-> **Beta** -- c9s is in early development and still needs validation. Feel free to use it! It reads local files only -- it never accesses your Claude account, never stores credentials, and adds zero cost to your Claude usage. Feedback and contributions are welcome!
+> **Beta** -- c9s is in early development and still needs validation. Feel free to use it! It reads local files and optionally fetches your usage percentage via Claude Code's OAuth token. It never stores credentials and adds zero cost to your Claude usage. Feedback and contributions are welcome!
 
 ## Why c9s?
 
@@ -35,6 +35,7 @@ It reads directly from `~/.claude/`. No API calls, no network, no daemon. One bi
 - **Token usage** -- see total tokens per session
 - **Rename sessions** -- give sessions meaningful names
 - **Git worktree awareness** *(beta)* -- see worktrees per session, open sessions in any worktree
+- **API usage tracking** -- see your 5-hour and 7-day utilization in the status bar and a dedicated history screen
 - **Mouse scroll** -- scroll through Claude conversation history, hold Shift/Option to copy text
 - **Persistent dashboard state** -- toggles (tokens, preview, grouping, worktrees) survive restarts
 - **Fully configurable** -- colors, keybindings, refresh interval via `~/.c9s/config.json`
@@ -90,6 +91,7 @@ Want to try it without real sessions? Run `c9s --demo` to see the dashboard with
 | `p` | Toggle preview panel |
 | `t` | Toggle token column |
 | `w` | Toggle worktree sub-rows (when enabled) |
+| `u` | Usage history screen |
 | `c` | Open config editor |
 | `q` / `Ctrl+c` | Quit (or detach if keep_alive is on) |
 
@@ -138,6 +140,44 @@ Once enabled, press `w` to toggle worktree sub-rows beneath sessions. Select a w
 
 This feature is in beta -- we're still evaluating the best experience while keeping c9s simple.
 
+## API usage tracking
+
+c9s can show your Anthropic API utilization directly in the tmux status bar and in a dedicated history screen. It reads from Claude Code's OAuth token (stored locally) -- no API keys or extra setup needed.
+
+### Status bar
+
+The status bar shows your current 5-hour utilization percentage. A `?` suffix indicates the data is stale (cached after a failed refresh). Configure what to show via the `status_usage` setting:
+
+| Value | What's shown |
+|-------|-------------|
+| `percent` | 5-hour utilization % (default) |
+| `cost` | Estimated session cost |
+| `tokens` | Total tokens across sessions |
+| `all` | Tokens, cost, and percent |
+| `off` | Nothing |
+
+Combine values with commas, e.g. `cost,percent`.
+
+### Usage history
+
+Press `u` on the dashboard to open the usage history screen. It shows your utilization over time with visual bars:
+
+- **5h peak** -- highest 5-hour utilization seen in that period
+- **7d last** -- last recorded 7-day utilization
+- **Tokens** -- net token delta for the period (max minus min snapshot)
+
+Switch between views:
+
+| Key | View |
+|-----|------|
+| `d` | Daily (default) |
+| `w` | Weekly |
+| `m` | Monthly |
+| `7` / `1` / `3` | Last 7 / 14 / 30 days |
+| `q` / `Esc` | Back to dashboard |
+
+Usage data is recorded to `~/.c9s/usage-history.jsonl` every 5 minutes while c9s is running. You can disable recording or reset history in the config editor (`c` → Usage history).
+
 ## Configuration
 
 ![c9s config editor](docs/config.png)
@@ -150,6 +190,8 @@ Configurable settings:
 - **Scroll speed** -- lines per mouse scroll event in session windows (1-10)
 - **Work directory** -- default directory for new sessions (empty = current directory)
 - **Keep alive** -- when on, quitting c9s detaches instead of killing sessions. Claude keeps running in the background, re-run `c9s` to re-attach
+- **Status bar usage** -- what metrics to show in the tmux status bar (percent/cost/tokens/all/off)
+- **Usage history** -- enable/disable recording, reset history
 - **Worktrees** -- mode (off/auto/always) and expand behavior (all/selected)
 - **Navigation keys** -- tmux keybindings for dashboard/next/prev session (default: `Ctrl+d`, `Ctrl+n`, `Ctrl+p`)
 - **Color theme** -- switch between `default` and `custom`, then tweak individual colors
@@ -179,7 +221,7 @@ c9s reads Claude Code's local data files:
 - `~/.claude/projects/<path>/sessions-index.json` -- session titles, summaries
 - `~/.claude/projects/<path>/<session>.jsonl` -- token usage, file mtime for status
 
-No API calls. No network access. Everything is local.
+No API keys needed. Session data is entirely local. The only network call is an optional usage API request (using Claude Code's existing OAuth token) to show your utilization percentage.
 
 Process detection uses `ps` + `lsof` to find running Claude processes and match them to sessions. File mtimes are cached to keep the dashboard fast.
 
