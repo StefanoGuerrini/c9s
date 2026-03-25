@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,14 +47,15 @@ var usageCache struct {
 }
 
 const (
-	usageCacheTTL  = 5 * time.Minute
-	usageMaxBackoff = 30 * time.Minute
+	usageCacheTTL   = 5 * time.Minute
+	usageMaxBackoff = 4 * time.Hour
 )
 
 // UsageResult wraps usage data with metadata about freshness.
 type UsageResult struct {
-	Usage *Usage
-	Stale bool // true when returning cached data after a failed refresh
+	Usage   *Usage
+	Stale   bool      // true when returning cached data after a failed refresh
+	Fetched time.Time // when the data was last fetched from the API
 }
 
 // FetchUsage returns the current account usage from Anthropic's OAuth API.
@@ -63,16 +65,17 @@ type UsageResult struct {
 func FetchUsage() (*UsageResult, error) {
 	usageCache.mu.Lock()
 	cached := usageCache.usage
-	fresh := cached != nil && time.Since(usageCache.fetched) < usageCacheTTL
+	fetched := usageCache.fetched
+	fresh := cached != nil && time.Since(fetched) < usageCacheTTL
 	tooSoon := time.Now().Before(usageCache.nextTry)
 	usageCache.mu.Unlock()
 
 	if fresh {
-		return &UsageResult{Usage: cached, Stale: false}, nil
+		return &UsageResult{Usage: cached, Stale: false, Fetched: fetched}, nil
 	}
 	if tooSoon {
 		if cached != nil {
-			return &UsageResult{Usage: cached, Stale: true}, nil
+			return &UsageResult{Usage: cached, Stale: true, Fetched: fetched}, nil
 		}
 		return nil, fmt.Errorf("usage API: backing off after repeated failures")
 	}
@@ -81,7 +84,14 @@ func FetchUsage() (*UsageResult, error) {
 	if err != nil {
 		usageCache.mu.Lock()
 		usageCache.failures++
-		backoff := usageCacheTTL * time.Duration(1<<min(usageCache.failures, 4))
+
+		// Use Retry-After from server if available, otherwise exponential backoff.
+		var backoff time.Duration
+		if rle, ok := err.(*rateLimitError); ok && rle.retryAfter > 0 {
+			backoff = rle.retryAfter
+		} else {
+			backoff = usageCacheTTL * time.Duration(1<<min(usageCache.failures, 6))
+		}
 		if backoff > usageMaxBackoff {
 			backoff = usageMaxBackoff
 		}
@@ -89,22 +99,30 @@ func FetchUsage() (*UsageResult, error) {
 		usageCache.mu.Unlock()
 
 		if cached != nil {
-			return &UsageResult{Usage: cached, Stale: true}, nil
+			return &UsageResult{Usage: cached, Stale: true, Fetched: fetched}, nil
 		}
 		return nil, err
 	}
 
+	now := time.Now()
 	usageCache.mu.Lock()
 	usageCache.usage = usage
-	usageCache.fetched = time.Now()
-	usageCache.failures = 0
-	usageCache.nextTry = time.Time{}
+	usageCache.fetched = now
+	// Halve failures on success instead of resetting to 0.
+	// This prevents hammering the API after recovering from rate limiting:
+	// after 3 failures (30min backoff) and a success, next cache TTL is still 5min
+	// but if it fails again, backoff starts at 10min (failures=1) not 10min (failures=1 from 0).
+	usageCache.failures = usageCache.failures / 2
+	if usageCache.failures == 0 {
+		usageCache.nextTry = time.Time{}
+	}
 	usageCache.mu.Unlock()
 
-	return &UsageResult{Usage: usage, Stale: false}, nil
+	return &UsageResult{Usage: usage, Stale: false, Fetched: now}, nil
 }
 
 // fetchUsageOnce makes a single API call to get usage data.
+// On 429, returns a rateLimitError with the Retry-After duration.
 func fetchUsageOnce() (*Usage, error) {
 	token, err := getOAuthToken()
 	if err != nil {
@@ -125,6 +143,11 @@ func fetchUsageOnce() (*Usage, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == 429 {
+		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+		return nil, &rateLimitError{retryAfter: retryAfter}
+	}
+
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("usage API: %d %s", resp.StatusCode, string(body))
@@ -135,6 +158,26 @@ func fetchUsageOnce() (*Usage, error) {
 		return nil, err
 	}
 	return &usage, nil
+}
+
+// rateLimitError is returned on 429 responses, carrying the server's requested wait time.
+type rateLimitError struct {
+	retryAfter time.Duration
+}
+
+func (e *rateLimitError) Error() string {
+	return fmt.Sprintf("usage API: 429 rate limited (retry after %s)", e.retryAfter)
+}
+
+// parseRetryAfter parses the Retry-After header value (seconds).
+func parseRetryAfter(val string) time.Duration {
+	if val == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(val); err == nil && secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	return 0
 }
 
 // oauthCreds is the JSON structure stored in the credentials file and keychain.

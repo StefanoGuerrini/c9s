@@ -130,6 +130,12 @@ type model struct {
 	insideTmux         bool // running inside tmux as dashboard
 	managedWindows     map[string]managedWindow // sessionID → window
 	replacedSessions   map[string]bool          // sessions replaced by fork/clear, hidden from dashboard
+	lastRecordedFetch  time.Time                // dedup usage history writes
+
+	// Usage history screen
+	usageScreen   bool
+	usageViewMode int // 0=daily, 1=weekly, 2=monthly
+	usageDayRange int // 7, 14, or 30 (daily mode)
 
 	// Rename
 	renaming      bool
@@ -154,7 +160,9 @@ type model struct {
 	configEditing bool
 	configEditIdx int
 	configInput   textinput.Model
-	configShowDesc bool // show field descriptions
+	configShowDesc    bool   // show field descriptions
+	configConfirming  bool   // showing confirmation prompt
+	configConfirmKey  string // key of field being confirmed
 
 	// Demo mode (--demo flag, fake data for screenshots)
 	demoMode bool
@@ -188,6 +196,7 @@ func initialModel(sessions []claude.SessionInfo, err error, insideTmux bool) mod
 		insideTmux:        insideTmux,
 		managedWindows:    make(map[string]managedWindow),
 		replacedSessions:  loadReplacedSessions(),
+		usageDayRange:     14,
 		expandedWorktrees: make(map[int]bool),
 		worktreeCache:     make(map[string][]git.Worktree),
 		showTokens:        cfg.Dashboard.ShowTokens,
@@ -278,6 +287,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			m.managedWindows[key] = mw
 		}
+		// Update dashboard status bar with global usage.
+		if m.insideTmux {
+			if usage := formatDashboardUsage(m.sessions); usage != "" {
+				tmux.SetWindowEnv(tmux.SessionName+":"+tmux.DashboardWindow, "c9s-usage", usage)
+			}
+		}
+		// Record usage history when we get fresh API data (dedup by fetch time).
+		if cfg.UsageHistory != "off" {
+			if result, err := claude.FetchUsage(); err == nil && !result.Stale && result.Fetched.After(m.lastRecordedFetch) {
+				var totalTokens int
+				for _, s := range m.sessions {
+					totalTokens += s.TotalTokens()
+				}
+				claude.RecordUsage(result.Usage, totalTokens)
+				m.lastRecordedFetch = result.Fetched
+			}
+		}
+
 		return m, tea.Tick(refreshInterval(), func(t time.Time) tea.Msg {
 			return tickMsg(t)
 		})
@@ -291,6 +318,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusText = ""
 		return m, nil
 	case tea.KeyPressMsg:
+		if m.usageScreen {
+			return m.updateUsage(msg)
+		}
 		if m.configScreen {
 			return m.updateConfig(msg)
 		}
@@ -439,6 +469,8 @@ func (m model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.backupSession(items)
 	case "c":
 		return m.enterConfigScreen()
+	case "u":
+		return m.enterUsageScreen()
 	}
 	m.adjustScroll()
 	return m, nil
@@ -528,14 +560,15 @@ func (m model) newSession(items []displayItem, effort string) (tea.Model, tea.Cm
 	}
 
 	// Use the selected session's project dir, configured work_dir, or cwd.
+	// Priority: effortWorkDir (worktree) > work_dir config > selected session's project.
 	workDir := m.effortWorkDir
+	if workDir == "" && cfg.WorkDir != "" {
+		workDir = cfg.WorkDir
+	}
 	if workDir == "" {
 		if s := m.selectedSession(items); s != nil && s.ProjectPath != "" {
 			workDir = s.ProjectPath
 		}
-	}
-	if workDir == "" && cfg.WorkDir != "" {
-		workDir = cfg.WorkDir
 	}
 	if workDir == "" {
 		workDir, _ = os.Getwd()
@@ -568,9 +601,11 @@ func (m model) startEffortPicker(items []displayItem) (tea.Model, tea.Cmd) {
 	if !m.insideTmux {
 		return m, statusCmd("tmux required — run c9s outside tmux to auto-bootstrap", true)
 	}
-	workDir := ""
-	if s := m.selectedSession(items); s != nil && s.ProjectPath != "" {
-		workDir = s.ProjectPath
+	workDir := cfg.WorkDir
+	if workDir == "" {
+		if s := m.selectedSession(items); s != nil && s.ProjectPath != "" {
+			workDir = s.ProjectPath
+		}
 	}
 	if workDir == "" {
 		workDir, _ = os.Getwd()
@@ -686,12 +721,19 @@ func (m *model) reconcileWindows(sessions []claude.SessionInfo) {
 			paneStatus: mw.paneStatus,
 		}
 
-		// Determine if this is a fork or a clear.
-		// Fork: new session has content (summary/prompt). Clear: blank session.
-		isFork := false
-		if newSession, ok := sessionByID[bestID]; ok {
-			isFork = newSession.Summary != "" || newSession.FirstPrompt != ""
+		// Determine if this is a fork, clear, or compaction.
+		// Fork: old session file still on disk AND new session has content.
+		// Clear: old session file still on disk AND new session is blank.
+		// Compaction: old session file gone (archived) — same as clear.
+		oldOnDisk := false
+		if oldSession, ok := sessionByID[mw.sessionID]; ok {
+			oldOnDisk = oldSession.Status != claude.StatusArchived
 		}
+		newHasContent := false
+		if newSession, ok := sessionByID[bestID]; ok {
+			newHasContent = newSession.Summary != "" || newSession.FirstPrompt != ""
+		}
+		isFork := oldOnDisk && newHasContent
 
 		if mw.sessionID != "" && !strings.HasPrefix(key, "new-") {
 			if isFork {
@@ -762,6 +804,224 @@ func (m model) replacedSessionsList() []string {
 	return out
 }
 
+// enterUsageScreen switches to the usage history view.
+func (m model) enterUsageScreen() (tea.Model, tea.Cmd) {
+	m.usageScreen = true
+	return m, nil
+}
+
+// updateUsage handles key input on the usage history screen.
+func (m model) updateUsage(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc":
+		m.usageScreen = false
+	case "d":
+		m.usageViewMode = 0 // daily
+	case "w":
+		m.usageViewMode = 1 // weekly
+	case "m":
+		m.usageViewMode = 2 // monthly
+	case "7":
+		m.usageViewMode = 0
+		m.usageDayRange = 7
+	case "1":
+		m.usageViewMode = 0
+		m.usageDayRange = 14
+	case "3":
+		m.usageViewMode = 0
+		m.usageDayRange = 30
+	}
+	return m, nil
+}
+
+// usageView renders the usage history screen.
+func (m model) usageView() string {
+	points := claude.LoadUsageHistory()
+
+	var b strings.Builder
+
+	// Title
+	modeLabel := "daily"
+	switch m.usageViewMode {
+	case 1:
+		modeLabel = "weekly"
+	case 2:
+		modeLabel = "monthly"
+	}
+	rangeLabel := ""
+	if m.usageViewMode == 0 {
+		rangeLabel = fmt.Sprintf(" (%dd)", m.usageDayRange)
+	}
+
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(statusColors().Accent))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColors().Dim))
+
+	b.WriteString(titleStyle.Render(" c9s — usage history"))
+	padding := m.width - 21 - len(modeLabel) - len(rangeLabel) - 1
+	if padding > 0 {
+		b.WriteString(strings.Repeat(" ", padding))
+	}
+	b.WriteString(dimStyle.Render(modeLabel + rangeLabel))
+	b.WriteString("\n\n")
+
+	if len(points) == 0 {
+		b.WriteString(dimStyle.Render("  No usage data yet. Data will appear after the API is polled."))
+		b.WriteString("\n")
+	} else {
+		// Aggregate data points into rows.
+		rows := m.aggregateUsageRows(points)
+
+		// Header
+		b.WriteString(dimStyle.Render("  Date          5h peak              7d last              Tokens"))
+		b.WriteString("\n")
+
+		maxRows := m.height - 6 // title + header + footer + padding
+		if maxRows < 1 {
+			maxRows = 1
+		}
+		if len(rows) > maxRows {
+			rows = rows[:maxRows]
+		}
+
+		for _, r := range rows {
+			b.WriteString("  ")
+			b.WriteString(fmt.Sprintf("%-14s", r.label))
+			b.WriteString(usageBar(r.fiveHour, 12))
+			b.WriteString(fmt.Sprintf(" %3.0f%%   ", r.fiveHour))
+			b.WriteString(usageBar(r.sevenDay, 12))
+			b.WriteString(fmt.Sprintf(" %3.0f%%   ", r.sevenDay))
+			if r.tokens > 0 {
+				b.WriteString(fmt.Sprintf("%8s", fmtTokens(r.tokens)))
+			} else {
+				b.WriteString(dimStyle.Render("       —"))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	// Fill remaining space
+	lines := strings.Count(b.String(), "\n")
+	for lines < m.height-2 {
+		b.WriteString("\n")
+		lines++
+	}
+
+	// Footer
+	b.WriteString(dimStyle.Render("  d daily  w weekly  m monthly  7/14/30 range  q back"))
+	return b.String()
+}
+
+type usageRow struct {
+	label    string
+	fiveHour float64
+	sevenDay float64
+	tokens   int
+}
+
+// aggregateUsageRows groups data points into display rows based on view mode.
+func (m model) aggregateUsageRows(points []claude.UsageDataPoint) []usageRow {
+	type bucket struct {
+		key      string
+		label    string
+		peak5h   float64
+		last7d   float64
+		maxToken int
+		minToken int
+		hasData  bool
+	}
+
+	bucketKey := func(t time.Time) (string, string) {
+		local := t.Local()
+		switch m.usageViewMode {
+		case 1: // weekly
+			y, w := local.ISOWeek()
+			// Label as the Monday of that week.
+			// Find Monday: go back (weekday - 1) days, Sunday = 0 → back 6.
+			wd := int(local.Weekday())
+			if wd == 0 {
+				wd = 7
+			}
+			monday := local.AddDate(0, 0, -(wd - 1))
+			return fmt.Sprintf("%d-W%02d", y, w), monday.Format("Jan 02")
+		case 2: // monthly
+			return local.Format("2006-01"), local.Format("Jan 2006")
+		default: // daily
+			return local.Format("2006-01-02"), local.Format("Jan 02 Mon")
+		}
+	}
+
+	// Determine cutoff.
+	now := time.Now()
+	var cutoff time.Time
+	switch m.usageViewMode {
+	case 1:
+		cutoff = now.AddDate(0, 0, -12*7)
+	case 2:
+		cutoff = now.AddDate(0, -6, 0)
+	default:
+		cutoff = now.AddDate(0, 0, -m.usageDayRange)
+	}
+
+	buckets := map[string]*bucket{}
+	var order []string
+
+	for _, p := range points {
+		if p.Time.Before(cutoff) {
+			continue
+		}
+		key, label := bucketKey(p.Time)
+		bk, ok := buckets[key]
+		if !ok {
+			bk = &bucket{key: key, label: label, minToken: p.Tokens}
+			buckets[key] = bk
+			order = append(order, key)
+		}
+		if p.FiveHour > bk.peak5h {
+			bk.peak5h = p.FiveHour
+		}
+		bk.last7d = p.SevenDay // last sample wins
+		if p.Tokens > bk.maxToken {
+			bk.maxToken = p.Tokens
+		}
+		if p.Tokens < bk.minToken {
+			bk.minToken = p.Tokens
+		}
+		bk.hasData = true
+	}
+
+	// Build rows in reverse chronological order.
+	var rows []usageRow
+	for i := len(order) - 1; i >= 0; i-- {
+		bk := buckets[order[i]]
+		tokens := bk.maxToken - bk.minToken
+		if tokens < 0 {
+			tokens = 0
+		}
+		rows = append(rows, usageRow{
+			label:    bk.label,
+			fiveHour: bk.peak5h,
+			sevenDay: bk.last7d,
+			tokens:   tokens,
+		})
+	}
+	return rows
+}
+
+// usageBar renders a bar chart: filled █ and empty ░.
+func usageBar(pct float64, width int) string {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	filled := int(pct/100*float64(width) + 0.5)
+	if filled > width {
+		filled = width
+	}
+	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+}
+
 // enterConfigScreen switches to the in-app config editor.
 func (m model) enterConfigScreen() (tea.Model, tea.Cmd) {
 	m.configScreen = true
@@ -801,10 +1061,30 @@ func (m model) configVisibleItems() []configDisplayItem {
 
 // updateConfig handles all key input on the config screen.
 func (m model) updateConfig(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.configConfirming {
+		return m.updateConfigConfirm(msg)
+	}
 	if m.configEditing {
 		return m.updateConfigEdit(msg)
 	}
 	return m.updateConfigNav(msg)
+}
+
+func (m model) updateConfigConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "enter":
+		m.configConfirming = false
+		switch m.configConfirmKey {
+		case "reset_history":
+			if err := claude.ResetUsageHistory(); err != nil {
+				return m, statusCmd("Failed to reset: "+err.Error(), true)
+			}
+			return m, statusCmd("Usage history cleared", false)
+		}
+	case "n", "esc":
+		m.configConfirming = false
+	}
+	return m, nil
 }
 
 func (m model) updateConfigNav(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -833,6 +1113,11 @@ func (m model) updateConfigNav(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter", "space":
 		if m.configCursor >= 0 && m.configCursor < len(items) && !items[m.configCursor].isHeader {
 			f := m.configFields[items[m.configCursor].fieldIdx]
+			if f.Action {
+				m.configConfirming = true
+				m.configConfirmKey = f.Key
+				return m, nil
+			}
 			if len(f.Options) > 0 {
 				// Cycle through options.
 				current := f.Get(m.configDraft)
@@ -967,7 +1252,9 @@ func (m model) configView() string {
 
 		// Show edit input for the field being edited.
 		var row string
-		if m.configEditing && item.fieldIdx == m.configEditIdx {
+		if f.Action {
+			row = "  " + dimStyle.Render(f.Label)
+		} else if m.configEditing && item.fieldIdx == m.configEditIdx {
 			row = dimStyle.Render(label) + m.configInput.View()
 		} else if len(f.Options) > 0 {
 			// Dropdown-style: show all options, highlight current.
@@ -1027,6 +1314,15 @@ func (m model) configView() string {
 }
 
 func (m model) configFooter() string {
+	if m.configConfirming {
+		label := "Confirm action?"
+		if m.configConfirmKey == "reset_history" {
+			label = "Reset all usage history?"
+		}
+		return helpStyle.Render(" " + label + "  " +
+			helpKeyStyle.Render("y") + " confirm  " +
+			helpKeyStyle.Render("esc") + " cancel")
+	}
 	if m.configEditing {
 		return helpStyle.Render(" " +
 			helpKeyStyle.Render("enter") + " accept  " +
@@ -1208,6 +1504,9 @@ func altView(s string) tea.View {
 func (m model) View() tea.View {
 	if m.width == 0 {
 		return altView("Loading...")
+	}
+	if m.usageScreen {
+		return altView(m.usageView())
 	}
 	if m.configScreen {
 		return altView(m.configView())
@@ -1545,6 +1844,7 @@ func (m model) footer() string {
 		parts = append(parts, helpKeyStyle.Render("w")+" "+wtLabel)
 	}
 	parts = append(parts,
+		helpKeyStyle.Render("u") + " usage",
 		helpKeyStyle.Render("c") + " config",
 		helpKeyStyle.Render("q") + " quit",
 	)
@@ -1896,6 +2196,54 @@ func usageHas(component string) bool {
 		}
 	}
 	return false
+}
+
+// formatDashboardUsage builds the global usage string for the dashboard status bar.
+// Shows API-level usage (percent, reset time) and aggregate cost across all sessions.
+func formatDashboardUsage(sessions []claude.SessionInfo) string {
+	if cfg.StatusUsage == "off" {
+		return ""
+	}
+
+	var apiPercent string
+	var resetStr string
+	if usageHas("percent") {
+		if result, err := claude.FetchUsage(); err == nil {
+			pct := fmt.Sprintf("%.0f%%", result.Usage.FiveHour.Utilization)
+			if result.Stale {
+				pct += "?"
+			}
+			apiPercent = pct
+			resetStr = fmtResetTime(result.Usage.FiveHour.ResetsAt)
+		}
+	}
+
+	var parts []string
+	if usageHas("tokens") {
+		var total int
+		for _, s := range sessions {
+			total += s.InputTokens + s.OutputTokens
+		}
+		if total > 0 {
+			parts = append(parts, fmtTokens(total))
+		}
+	}
+	if usageHas("cost") {
+		var total float64
+		for _, s := range sessions {
+			total += estimateCost(s)
+		}
+		if total > 0 {
+			parts = append(parts, fmt.Sprintf("~$%.2f", total))
+		}
+	}
+	if apiPercent != "" {
+		if resetStr != "" {
+			apiPercent += " " + resetStr
+		}
+		parts = append(parts, apiPercent)
+	}
+	return strings.Join(parts, " · ")
 }
 
 // formatUsage builds the usage string for the tmux status bar based on config.

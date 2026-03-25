@@ -195,6 +195,74 @@ func TestReconcileWindows_NoNewSession(t *testing.T) {
 	}
 }
 
+func TestUsageBar(t *testing.T) {
+	tests := []struct {
+		pct   float64
+		width int
+		want  string
+	}{
+		{0, 12, "░░░░░░░░░░░░"},
+		{50, 12, "██████░░░░░░"},
+		{100, 12, "████████████"},
+		{25, 12, "███░░░░░░░░░"},
+		{-5, 12, "░░░░░░░░░░░░"},
+		{150, 12, "████████████"},
+	}
+	for _, tt := range tests {
+		got := usageBar(tt.pct, tt.width)
+		if got != tt.want {
+			t.Errorf("usageBar(%.0f, %d) = %q, want %q", tt.pct, tt.width, got, tt.want)
+		}
+	}
+}
+
+func TestAggregateUsageRows_Daily(t *testing.T) {
+	now := time.Now()
+	m := &model{usageViewMode: 0, usageDayRange: 7}
+
+	points := []claude.UsageDataPoint{
+		{Time: now.Add(-2 * 24 * time.Hour), FiveHour: 40, SevenDay: 10, Tokens: 100000},
+		{Time: now.Add(-2*24*time.Hour + time.Hour), FiveHour: 60, SevenDay: 12, Tokens: 150000},
+		{Time: now.Add(-1 * 24 * time.Hour), FiveHour: 80, SevenDay: 15, Tokens: 200000},
+		{Time: now, FiveHour: 30, SevenDay: 20, Tokens: 300000},
+	}
+
+	rows := m.aggregateUsageRows(points)
+	if len(rows) == 0 {
+		t.Fatal("expected rows")
+	}
+	// Most recent first.
+	if rows[0].fiveHour != 30 {
+		t.Errorf("first row 5h peak = %v, want 30", rows[0].fiveHour)
+	}
+	// Second day should have peak of 60 (two samples: 40 and 60).
+	found := false
+	for _, r := range rows {
+		if r.fiveHour == 60 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected a row with peak 5h = 60")
+	}
+}
+
+func TestAggregateUsageRows_Weekly(t *testing.T) {
+	now := time.Now()
+	m := &model{usageViewMode: 1}
+
+	points := []claude.UsageDataPoint{
+		{Time: now.Add(-3 * 24 * time.Hour), FiveHour: 50, SevenDay: 10, Tokens: 100000},
+		{Time: now, FiveHour: 70, SevenDay: 20, Tokens: 200000},
+	}
+
+	rows := m.aggregateUsageRows(points)
+	if len(rows) == 0 {
+		t.Fatal("expected rows")
+	}
+}
+
 func TestFmtResetTime(t *testing.T) {
 	tests := []struct {
 		name     string

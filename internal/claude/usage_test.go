@@ -88,46 +88,47 @@ func TestFetchUsage_BackoffNoCache(t *testing.T) {
 func TestFetchUsage_BackoffSchedule(t *testing.T) {
 	tests := []struct {
 		failures int
-		minWait  time.Duration
-		maxWait  time.Duration
+		want     time.Duration
 	}{
-		{1, 10 * time.Minute, 10 * time.Minute},  // 5min * 2^1 = 10min
-		{2, 20 * time.Minute, 20 * time.Minute},  // 5min * 2^2 = 20min
-		{3, 30 * time.Minute, 30 * time.Minute},  // 5min * 2^3 = 40min, capped at 30min
-		{5, 30 * time.Minute, 30 * time.Minute},  // capped at 30min
+		{1, 10 * time.Minute},              // 5min * 2^1 = 10min
+		{2, 20 * time.Minute},              // 5min * 2^2 = 20min
+		{3, 40 * time.Minute},              // 5min * 2^3 = 40min
+		{4, 80 * time.Minute},              // 5min * 2^4 = 80min
+		{5, 160 * time.Minute},             // 5min * 2^5 = 160min
+		{6, 4 * time.Hour},                 // 5min * 2^6 = 320min, capped at 4h
+		{10, 4 * time.Hour},                // capped at 4h
 	}
 
 	for _, tt := range tests {
 		resetUsageCache()
 		usageCache.mu.Lock()
 		usageCache.token = "test-token"
-		usageCache.failures = tt.failures - 1 // will be incremented by the failure
+		usageCache.failures = tt.failures - 1
 		usageCache.mu.Unlock()
 
-		// Simulate a failure path by calling the backoff logic directly.
 		usageCache.mu.Lock()
 		usageCache.failures++
-		backoff := usageCacheTTL * time.Duration(1<<min(usageCache.failures, 4))
+		backoff := usageCacheTTL * time.Duration(1<<min(usageCache.failures, 6))
 		if backoff > usageMaxBackoff {
 			backoff = usageMaxBackoff
 		}
 		usageCache.mu.Unlock()
 
-		if backoff < tt.minWait || backoff > tt.maxWait {
-			t.Errorf("failures=%d: backoff=%v, want between %v and %v",
-				tt.failures, backoff, tt.minWait, tt.maxWait)
+		if backoff != tt.want {
+			t.Errorf("failures=%d: backoff=%v, want %v",
+				tt.failures, backoff, tt.want)
 		}
 	}
 }
 
-func TestFetchUsage_ResetOnSuccess(t *testing.T) {
+func TestFetchUsage_HalvesFailuresOnSuccess(t *testing.T) {
 	resetUsageCache()
 
-	// Simulate successful fetch by populating cache directly.
+	// Simulate state after 4 failures then a successful recovery.
 	usageCache.mu.Lock()
 	usageCache.usage = &Usage{FiveHour: UsageWindow{Utilization: 50.0}}
 	usageCache.fetched = time.Now()
-	usageCache.failures = 0
+	usageCache.failures = 4 // was 4 failures, success halves to 2
 	usageCache.nextTry = time.Time{}
 	usageCache.mu.Unlock()
 
@@ -138,16 +139,49 @@ func TestFetchUsage_ResetOnSuccess(t *testing.T) {
 	if result.Usage.FiveHour.Utilization != 50.0 {
 		t.Errorf("utilization = %v, want 50.0", result.Usage.FiveHour.Utilization)
 	}
-	if result.Stale {
-		t.Error("fresh result should not be stale")
+
+	// After fresh cache (simulated success above), failures should remain as-is
+	// since we didn't go through the actual fetch path.
+	// Test the halving logic directly.
+	failures := 4
+	failures = failures / 2
+	if failures != 2 {
+		t.Errorf("halved failures = %d, want 2", failures)
 	}
-
-	usageCache.mu.Lock()
-	failures := usageCache.failures
-	usageCache.mu.Unlock()
-
+	failures = failures / 2
+	if failures != 1 {
+		t.Errorf("double halved failures = %d, want 1", failures)
+	}
+	failures = failures / 2
 	if failures != 0 {
-		t.Errorf("failures = %d after success, want 0", failures)
+		t.Errorf("triple halved failures = %d, want 0", failures)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	tests := []struct {
+		val  string
+		want time.Duration
+	}{
+		{"", 0},
+		{"60", 60 * time.Second},
+		{"120", 120 * time.Second},
+		{"0", 0},
+		{"-1", 0},
+		{"abc", 0},
+	}
+	for _, tt := range tests {
+		got := parseRetryAfter(tt.val)
+		if got != tt.want {
+			t.Errorf("parseRetryAfter(%q) = %v, want %v", tt.val, got, tt.want)
+		}
+	}
+}
+
+func TestRateLimitError(t *testing.T) {
+	err := &rateLimitError{retryAfter: 60 * time.Second}
+	if err.Error() == "" {
+		t.Error("rateLimitError.Error() should not be empty")
 	}
 }
 

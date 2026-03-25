@@ -135,6 +135,7 @@ q on dashboard   → kills entire c9s tmux session
 | `t` | Toggle token column |
 | `w` | Toggle worktree sub-rows + branch column (when worktrees enabled) |
 | `r` | Cycle refresh interval (1s/2s/3s/5s) |
+| `u` | Usage history screen |
 | `q` / `Ctrl+c` | Quit |
 | `Ctrl+n/p` | Next/previous session window (from claude window) |
 | `Ctrl+d` | Return to dashboard (from claude window) |

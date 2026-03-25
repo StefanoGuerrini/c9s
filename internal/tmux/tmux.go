@@ -425,15 +425,15 @@ func ConfigureStatusBar(keys NavKeys, colors StatusColors, version string, scrol
 
 	nextPrev := keyDisplayName(keys.NextSession) + "/" + keyDisplayName(keys.PrevSession)[len("ctrl+"):]
 	dash := keyDisplayName(keys.Dashboard)
-	// On dashboard: show version right-aligned.
+	// On dashboard: show usage + version right-aligned.
 	// On session windows: show usage + nav hints right-aligned.
 	// #{@c9s-usage} is set per-window by the tick handler with token/cost info.
 	usageFmt := fmt.Sprintf("#{?#{@c9s-usage},#[fg=%s]#{@c9s-usage}  ,}", colors.Fg)
 	t("status-format[0]",
 		fmt.Sprintf("#[fg=%s,bold] c9s #[fg=%s]│ #[fg=%s]#W ", colors.Accent, colors.Dim, colors.Fg)+
 			"#[align=right]"+
-			fmt.Sprintf("#{?#{==:#W,%s},#[fg=%s]%s ,%s#[fg=%s]%s switch  %s ← dashboard }",
-				DashboardWindow, colors.Dim, version,
+			fmt.Sprintf("#{?#{==:#W,%s},%s#[fg=%s]%s ,%s#[fg=%s]%s switch  %s ← dashboard }",
+				DashboardWindow, usageFmt, colors.Dim, version,
 				usageFmt, colors.Dim, nextPrev, dash))
 }
 

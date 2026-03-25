@@ -21,6 +21,7 @@ type Config struct {
 	CostInput      float64 `json:"cost_input"`      // $/M input+cache_write tokens (default: 3.0 = Sonnet)
 	CostOutput     float64 `json:"cost_output"`     // $/M output tokens (default: 15.0 = Sonnet)
 	CostCache      float64 `json:"cost_cache"`      // $/M cache read tokens (default: 0.30 = Sonnet)
+	UsageHistory   string  `json:"usage_history"`   // "on" (default) or "off" — record API usage over time
 	Worktrees      string  `json:"worktrees"`       // "off" (default), "auto", "always"
 	WorktreeExpand string `json:"worktree_expand"`  // "all" (default), "selected"
 	Keys           Keys   `json:"keys"`
@@ -93,6 +94,7 @@ func Default() Config {
 		CostInput:      3.0,
 		CostOutput:     15.0,
 		CostCache:      0.30,
+		UsageHistory:   "on",
 		Worktrees:      "off",
 		WorktreeExpand: "all",
 		Keys: Keys{
@@ -151,6 +153,7 @@ type Field struct {
 	Get     func(Config) string
 	Set     func(*Config, string)
 	Options []string // if non-nil, cycle through these on Enter (dropdown-style)
+	Action  bool     // if true, Enter triggers confirmation instead of edit
 }
 
 // EditableFields returns the list of all configurable fields.
@@ -220,6 +223,21 @@ func EditableFields() []Field {
 					c.CostCache = n
 				}
 			}},
+		// Usage history
+		{Section: "Usage history", Label: "Recording", Key: "usage_history",
+			Desc:    "Record API usage to ~/.c9s/usage-history.jsonl every 5 minutes",
+			Options: []string{"on", "off"},
+			Get:     func(c Config) string { return c.UsageHistory },
+			Set: func(c *Config, v string) {
+				if v == "on" || v == "off" {
+					c.UsageHistory = v
+				}
+			}},
+		{Section: "Usage history", Label: "Reset history", Key: "reset_history",
+			Desc:   "Delete all recorded usage data",
+			Action: true,
+			Get:    func(c Config) string { return "" },
+			Set:    func(c *Config, v string) {}},
 		// Worktrees (beta)
 		{Section: "Worktrees (beta)", Label: "Mode", Key: "worktrees",
 			Desc:    "off: disabled, auto: show if worktrees exist, always: always show",
