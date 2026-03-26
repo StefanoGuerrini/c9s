@@ -11,11 +11,12 @@ import (
 
 // UsageDataPoint is a single usage snapshot recorded from the API.
 type UsageDataPoint struct {
-	Time     time.Time `json:"t"`
-	FiveHour float64   `json:"5h"`
-	SevenDay float64   `json:"7d"`
-	Extra    *float64  `json:"extra"`
-	Tokens   int       `json:"tokens"`
+	Time     time.Time      `json:"t"`
+	FiveHour float64        `json:"5h"`
+	SevenDay float64        `json:"7d"`
+	Extra    *float64       `json:"extra"`
+	Tokens   int            `json:"tokens"`
+	Models   map[string]int `json:"models,omitempty"` // model name → cumulative tokens
 }
 
 // UsageHistoryPathOverride overrides the history file path for testing.
@@ -31,7 +32,7 @@ func usageHistoryPath() string {
 
 // RecordUsage appends a usage data point to the history file.
 // Errors are silently ignored — this should never block the main flow.
-func RecordUsage(u *Usage, totalTokens int) {
+func RecordUsage(u *Usage, totalTokens int, models map[string]int) {
 	if u == nil {
 		return
 	}
@@ -47,6 +48,7 @@ func RecordUsage(u *Usage, totalTokens int) {
 		SevenDay: u.SevenDay.Utilization,
 		Extra:    extra,
 		Tokens:   totalTokens,
+		Models:   models,
 	}
 
 	path := usageHistoryPath()

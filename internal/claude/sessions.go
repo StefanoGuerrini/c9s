@@ -46,6 +46,9 @@ type cachedTokens struct {
 	output      int
 	cacheRead   int
 	cacheCreate int
+	models      map[string]int // model name → total tokens
+	lastModel   string         // most recent model used in session
+	forkedFrom  string         // parent session ID (from forkedFrom field)
 }
 
 // Status represents the lifecycle state of a Claude Code session.
@@ -427,11 +430,18 @@ func readTokenUsage(s *SessionInfo) {
 	}
 	defer f.Close()
 
+	var models map[string]int
+	var lastModel string
+	var forkedFrom string
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 	for scanner.Scan() {
 		var entry struct {
+			ForkedFrom *struct {
+				SessionID string `json:"sessionId"`
+			} `json:"forkedFrom"`
 			Message *struct {
+				Model string `json:"model"`
 				Usage *struct {
 					InputTokens              int `json:"input_tokens"`
 					OutputTokens             int `json:"output_tokens"`
@@ -443,12 +453,22 @@ func readTokenUsage(s *SessionInfo) {
 		if json.Unmarshal(scanner.Bytes(), &entry) != nil {
 			continue
 		}
+		if forkedFrom == "" && entry.ForkedFrom != nil && entry.ForkedFrom.SessionID != "" {
+			forkedFrom = entry.ForkedFrom.SessionID
+		}
 		if entry.Message != nil && entry.Message.Usage != nil {
 			u := entry.Message.Usage
 			s.InputTokens += u.InputTokens
 			s.OutputTokens += u.OutputTokens
 			s.CacheRead += u.CacheReadInputTokens
 			s.CacheCreate += u.CacheCreationInputTokens
+			if entry.Message.Model != "" {
+				lastModel = entry.Message.Model
+				if models == nil {
+					models = make(map[string]int)
+				}
+				models[entry.Message.Model] += u.InputTokens + u.OutputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+			}
 		}
 	}
 
@@ -459,8 +479,62 @@ func readTokenUsage(s *SessionInfo) {
 		output:      s.OutputTokens,
 		cacheRead:   s.CacheRead,
 		cacheCreate: s.CacheCreate,
+		models:      models,
+		lastModel:   lastModel,
+		forkedFrom:  forkedFrom,
 	}
 	cache.mu.Unlock()
+}
+
+// GetSupersededSessions returns session IDs that have been replaced by a newer
+// fork or compaction. A session is superseded if another session's forkedFrom
+// points to it AND the successor has a newer mtime.
+// Uses the cached forkedFrom data populated by readTokenUsage.
+func GetSupersededSessions() map[string]bool {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+
+	superseded := make(map[string]bool)
+	for _, ct := range cache.tokens {
+		if ct.forkedFrom == "" {
+			continue
+		}
+		parent, ok := cache.tokens[ct.forkedFrom]
+		if !ok {
+			continue // parent not in cache (archived, no JSONL)
+		}
+		// Only supersede if the child is newer than the parent.
+		if ct.mtime.After(parent.mtime) {
+			superseded[ct.forkedFrom] = true
+		}
+	}
+	return superseded
+}
+
+// GetLastModel returns the most recent model used in a session.
+func GetLastModel(sessionID string) string {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if ct, ok := cache.tokens[sessionID]; ok {
+		return ct.lastModel
+	}
+	return ""
+}
+
+// GetModelBreakdown returns total tokens per model across all given sessions,
+// using the cached token data populated by readTokenUsage.
+func GetModelBreakdown(sessions []SessionInfo) map[string]int {
+	result := make(map[string]int)
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	for _, s := range sessions {
+		if ct, ok := cache.tokens[s.SessionID]; ok {
+			for m, t := range ct.models {
+				result[m] += t
+			}
+		}
+	}
+	return result
 }
 
 // readHistory parses ~/.claude/history.jsonl and returns one SessionInfo per

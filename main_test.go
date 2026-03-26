@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stefanoguerrini/c9s/internal/claude"
+	"github.com/stefanoguerrini/c9s/internal/git"
 	"github.com/stefanoguerrini/c9s/internal/tmux"
 )
 
@@ -281,6 +282,75 @@ func TestFmtResetTime(t *testing.T) {
 			got := fmtResetTime(tt.resetsAt)
 			if got != tt.want {
 				t.Errorf("fmtResetTime(%q) = %q, want %q", tt.resetsAt, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSelectedSessionPreservedOnReorder(t *testing.T) {
+	// Simulate: cursor at session B (index 1), then sessions reorder so B moves to index 2.
+	now := time.Now()
+	m := &model{
+		sessions: []claude.SessionInfo{
+			{SessionID: "aaa", Modified: now.Add(-1 * time.Hour)},
+			{SessionID: "bbb", Modified: now.Add(-2 * time.Hour)},
+			{SessionID: "ccc", Modified: now.Add(-3 * time.Hour)},
+		},
+		cursor:            1, // pointing at "bbb"
+		replacedSessions:  make(map[string]bool),
+		managedWindows:    make(map[string]managedWindow),
+		expandedWorktrees: make(map[int]bool),
+		worktreeCache:     make(map[string][]git.Worktree),
+		height:            40,
+		width:             120,
+	}
+
+	// Verify cursor is on "bbb".
+	items := m.items()
+	if s := m.selectedSession(items); s == nil || s.SessionID != "bbb" {
+		t.Fatalf("before reorder: selected = %v, want bbb", s)
+	}
+
+	// Simulate reorder: "ccc" becomes most recent, pushing "bbb" to index 2.
+	selectedID := m.selectedSession(m.items()).SessionID
+	m.sessions = []claude.SessionInfo{
+		{SessionID: "ccc", Modified: now},
+		{SessionID: "aaa", Modified: now.Add(-1 * time.Hour)},
+		{SessionID: "bbb", Modified: now.Add(-2 * time.Hour)},
+	}
+
+	// Restore cursor to "bbb".
+	for i, item := range m.items() {
+		if !item.isHeader && !item.isWorktreeRow && item.session.SessionID == selectedID {
+			m.cursor = i
+			break
+		}
+	}
+
+	items = m.items()
+	if s := m.selectedSession(items); s == nil || s.SessionID != "bbb" {
+		t.Errorf("after reorder: selected = %v, want bbb", s)
+	}
+	if m.cursor != 2 {
+		t.Errorf("cursor = %d, want 2", m.cursor)
+	}
+}
+
+func TestShortModelName(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"claude-opus-4-6", "opus"},
+		{"claude-sonnet-4-6", "sonnet"},
+		{"claude-haiku-4-5-20251001", "haiku"},
+		{"claude-3-5-sonnet-20241022", "sonnet"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := shortModelName(tt.input)
+			if got != tt.want {
+				t.Errorf("shortModelName(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}

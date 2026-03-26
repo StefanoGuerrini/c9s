@@ -17,7 +17,7 @@ func TestRecordUsage(t *testing.T) {
 		FiveHour: UsageWindow{Utilization: 42.5},
 		SevenDay: UsageWindow{Utilization: 15.2},
 	}
-	RecordUsage(u, 125000)
+	RecordUsage(u, 125000, nil)
 
 	data, err := os.ReadFile(UsageHistoryPathOverride)
 	if err != nil {
@@ -48,8 +48,8 @@ func TestRecordUsageAppend(t *testing.T) {
 	defer func() { UsageHistoryPathOverride = "" }()
 
 	u := &Usage{FiveHour: UsageWindow{Utilization: 10.0}}
-	RecordUsage(u, 100)
-	RecordUsage(u, 200)
+	RecordUsage(u, 100, nil)
+	RecordUsage(u, 200, nil)
 
 	points := LoadUsageHistory()
 	if len(points) != 2 {
@@ -62,7 +62,7 @@ func TestRecordUsageCreatesDir(t *testing.T) {
 	UsageHistoryPathOverride = filepath.Join(dir, "sub", "dir", "history.jsonl")
 	defer func() { UsageHistoryPathOverride = "" }()
 
-	RecordUsage(&Usage{}, 0)
+	RecordUsage(&Usage{}, 0, nil)
 
 	if _, err := os.Stat(UsageHistoryPathOverride); err != nil {
 		t.Errorf("file not created: %v", err)
@@ -79,7 +79,7 @@ func TestRecordUsageWithExtra(t *testing.T) {
 		FiveHour:   UsageWindow{Utilization: 50.0},
 		ExtraUsage: &ExtraUsage{Utilization: &pct},
 	}
-	RecordUsage(u, 500)
+	RecordUsage(u, 500, nil)
 
 	points := LoadUsageHistory()
 	if len(points) != 1 {
@@ -90,9 +90,35 @@ func TestRecordUsageWithExtra(t *testing.T) {
 	}
 }
 
+func TestRecordUsageWithModels(t *testing.T) {
+	dir := t.TempDir()
+	UsageHistoryPathOverride = filepath.Join(dir, "history.jsonl")
+	defer func() { UsageHistoryPathOverride = "" }()
+
+	models := map[string]int{
+		"claude-opus-4-6":    80000,
+		"claude-sonnet-4-6":  20000,
+	}
+	RecordUsage(&Usage{FiveHour: UsageWindow{Utilization: 30.0}}, 100000, models)
+
+	points := LoadUsageHistory()
+	if len(points) != 1 {
+		t.Fatalf("got %d points, want 1", len(points))
+	}
+	if len(points[0].Models) != 2 {
+		t.Errorf("Models len = %d, want 2", len(points[0].Models))
+	}
+	if points[0].Models["claude-opus-4-6"] != 80000 {
+		t.Errorf("opus tokens = %d, want 80000", points[0].Models["claude-opus-4-6"])
+	}
+	if points[0].Models["claude-sonnet-4-6"] != 20000 {
+		t.Errorf("sonnet tokens = %d, want 20000", points[0].Models["claude-sonnet-4-6"])
+	}
+}
+
 func TestRecordUsageNil(t *testing.T) {
 	// Should not panic.
-	RecordUsage(nil, 0)
+	RecordUsage(nil, 0, nil)
 }
 
 func TestLoadUsageHistoryMissing(t *testing.T) {
@@ -116,7 +142,7 @@ func TestLoadUsageHistoryCache(t *testing.T) {
 	historyCache.points = nil
 	historyCache.mu.Unlock()
 
-	RecordUsage(&Usage{FiveHour: UsageWindow{Utilization: 10.0}}, 100)
+	RecordUsage(&Usage{FiveHour: UsageWindow{Utilization: 10.0}}, 100, nil)
 
 	p1 := LoadUsageHistory()
 	if len(p1) != 1 {
@@ -132,7 +158,7 @@ func TestLoadUsageHistoryCache(t *testing.T) {
 	// Write another point — mtime changes, cache invalidated.
 	// Need small delay so mtime differs.
 	time.Sleep(10 * time.Millisecond)
-	RecordUsage(&Usage{FiveHour: UsageWindow{Utilization: 20.0}}, 200)
+	RecordUsage(&Usage{FiveHour: UsageWindow{Utilization: 20.0}}, 200, nil)
 
 	p3 := LoadUsageHistory()
 	if len(p3) != 2 {
@@ -151,8 +177,8 @@ func TestResetUsageHistory(t *testing.T) {
 	historyCache.points = nil
 	historyCache.mu.Unlock()
 
-	RecordUsage(&Usage{FiveHour: UsageWindow{Utilization: 50.0}}, 500)
-	RecordUsage(&Usage{FiveHour: UsageWindow{Utilization: 60.0}}, 600)
+	RecordUsage(&Usage{FiveHour: UsageWindow{Utilization: 50.0}}, 500, nil)
+	RecordUsage(&Usage{FiveHour: UsageWindow{Utilization: 60.0}}, 600, nil)
 
 	points := LoadUsageHistory()
 	if len(points) != 2 {

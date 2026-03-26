@@ -134,11 +134,11 @@ func RenameWindow(windowID, name string) error {
 	return exec.Command("tmux", "rename-window", "-t", windowID, name).Run()
 }
 
-// ListWindows returns window names and IDs in the c9s session.
+// ListWindows returns window names, IDs, and tagged session IDs in the c9s session.
 func ListWindows() ([]WindowInfo, error) {
 	out, err := exec.Command("tmux", "list-windows",
 		"-t", SessionName,
-		"-F", "#{window_id}\t#{window_name}\t#{pane_current_command}",
+		"-F", "#{window_id}\t#{window_name}\t#{pane_current_command}\t#{@c9s-session-id}",
 	).Output()
 	if err != nil {
 		return nil, err
@@ -149,13 +149,16 @@ func ListWindows() ([]WindowInfo, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 3)
+		parts := strings.SplitN(line, "\t", 4)
 		if len(parts) < 2 {
 			continue
 		}
 		w := WindowInfo{ID: parts[0], Name: parts[1]}
 		if len(parts) >= 3 {
 			w.Command = parts[2]
+		}
+		if len(parts) >= 4 {
+			w.SessionID = parts[3]
 		}
 		windows = append(windows, w)
 	}
@@ -164,9 +167,10 @@ func ListWindows() ([]WindowInfo, error) {
 
 // WindowInfo describes a tmux window.
 type WindowInfo struct {
-	ID      string // e.g. @1
-	Name    string // window name
-	Command string // current pane command
+	ID        string // e.g. @1
+	Name      string // window name
+	Command   string // current pane command
+	SessionID string // @c9s-session-id user option (empty if not set)
 }
 
 // PaneStatus represents the state of a claude session inside a tmux pane.
