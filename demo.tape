@@ -7,130 +7,121 @@ Set FontSize 14
 Set Width 1200
 Set Height 650
 Set Padding 16
-Set TypingSpeed 40ms
+Set TypingSpeed 50ms
 Set Shell zsh
 
-# Start demo — clean view, no tokens, no worktrees
+# Start demo — clean view
 Type "./c9s --demo --inside-tmux"
-Enter
-Sleep 2s
-
-# Navigate sessions
-Down
-Sleep 300ms
-Down
-Sleep 300ms
-Down
-Sleep 300ms
-Up
-Sleep 300ms
-Up
-Sleep 300ms
-Up
-Sleep 500ms
-
-# Open a session (Enter)
 Enter
 Sleep 2.5s
 
-# Return to dashboard (any key)
-Escape
+# Navigate sessions slowly
+Down
+Sleep 600ms
+Down
+Sleep 600ms
+Down
+Sleep 600ms
+Up
+Sleep 600ms
+Up
+Sleep 600ms
 Sleep 1s
 
-# Search for a session
-Type "/"
-Sleep 300ms
-Type "docker"
-Sleep 1s
+# Open a session
+Enter
+Sleep 4s
+
+# Return to dashboard
 Escape
-Sleep 800ms
+Sleep 1.5s
+
+# Search
+Type "/"
+Sleep 500ms
+Type "docker"
+Sleep 1.5s
+Escape
+Sleep 1.2s
 
 # Preview panel
 Type "p"
-Sleep 1.5s
+Sleep 2s
 Down
-Sleep 500ms
-Down
-Sleep 500ms
-Down
-Sleep 500ms
-Type "p"
 Sleep 800ms
+Down
+Sleep 800ms
+Down
+Sleep 800ms
+Type "p"
+Sleep 1.2s
 
-# Toggle tokens on
+# Tokens on
 Type "t"
-Sleep 1.5s
+Sleep 2s
 
 # Group by project
 Tab
-Sleep 1.5s
+Sleep 2s
 
 # Group by status
 Tab
-Sleep 1.5s
+Sleep 2s
 
 # Back to flat
 Tab
-Sleep 800ms
+Sleep 1.2s
 
-# Toggle tokens off
+# Tokens off
 Type "t"
-Sleep 500ms
-
-# Toggle worktree rows on
-Type "w"
-Sleep 1.5s
-Down
-Sleep 300ms
-Down
-Sleep 300ms
-Down
-Sleep 300ms
-Down
-Sleep 300ms
-
-# Toggle worktrees off
-Type "w"
 Sleep 800ms
 
-# Usage history — daily
-Type "u"
+# Worktrees
+Type "w"
 Sleep 2s
-
-# Weekly
-Type "w"
-Sleep 1.5s
-
-# Monthly
-Type "m"
-Sleep 1.5s
-
-# Back to dashboard
-Escape
-Sleep 800ms
-
-# Config screen
-Type "c"
-Sleep 1.5s
 Down
-Sleep 200ms
-Down
-Sleep 200ms
-Down
-Sleep 200ms
-Down
-Sleep 200ms
-Escape
-Sleep 800ms
-
-# Rename a session
-Type "R"
 Sleep 500ms
-Type "My important task"
-Sleep 800ms
+Down
+Sleep 500ms
+Down
+Sleep 500ms
+Down
+Sleep 500ms
+Type "w"
+Sleep 1.2s
+
+# Usage history
+Type "u"
+Sleep 2.5s
+Type "w"
+Sleep 2s
+Type "m"
+Sleep 2s
 Escape
-Sleep 1s
+Sleep 1.2s
+
+# Config
+Type "c"
+Sleep 2s
+Down
+Sleep 400ms
+Down
+Sleep 400ms
+Down
+Sleep 400ms
+Down
+Sleep 400ms
+Escape
+Sleep 1.2s
+
+# Rename
+Type "R"
+Sleep 800ms
+Type "My important task"
+Sleep 1.2s
+Escape
+Sleep 1.5s
 
 # Quit
 Type "q"
-Sleep 300ms
+Sleep 500ms

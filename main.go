@@ -924,33 +924,74 @@ func (m model) updateUsage(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// demoSessionView renders a fake Claude session screen for demo/recording.
+// demoSessionView renders a screen that looks like a real Claude Code session.
 func (m model) demoSessionView() string {
-	accent := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(statusColors().Accent))
-	dim := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColors().Dim))
-	fg := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColors().Fg))
+	purple := lipgloss.NewStyle().Foreground(lipgloss.Color("#b388ff"))
+	bold := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#e0e0e0"))
+	fg := lipgloss.NewStyle().Foreground(lipgloss.Color("#cccccc"))
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("#666688"))
+	green := lipgloss.NewStyle().Foreground(lipgloss.Color("#66bb6a"))
+	cyan := lipgloss.NewStyle().Foreground(lipgloss.Color("#4dd0e1"))
+	yellow := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffd54f"))
+	toolBorder := lipgloss.NewStyle().Foreground(lipgloss.Color("#555577"))
 
 	var b strings.Builder
+
+	// User message
 	b.WriteString("\n")
-	b.WriteString(accent.Render("  claude") + dim.Render(" — ") + fg.Render(m.demoSessionName))
+	b.WriteString(purple.Render(" ❯ ") + bold.Render("refactor the auth middleware to use JWT tokens"))
 	b.WriteString("\n\n")
-	b.WriteString(dim.Render("  ╭──────────────────────────────────────────────────────╮"))
+
+	// Assistant response
+	b.WriteString(fg.Render("  I'll refactor the auth middleware from session cookies to JWT tokens."))
 	b.WriteString("\n")
-	b.WriteString(dim.Render("  │") + fg.Render("  Resuming session...                                  ") + dim.Render("│"))
-	b.WriteString("\n")
-	b.WriteString(dim.Render("  │") + fg.Render("                                                       ") + dim.Render("│"))
-	b.WriteString("\n")
-	b.WriteString(dim.Render("  │") + fg.Render("  > Refactoring auth middleware to use JWT tokens       ") + dim.Render("│"))
-	b.WriteString("\n")
-	b.WriteString(dim.Render("  │") + fg.Render("    instead of session cookies. Updating the token      ") + dim.Render("│"))
-	b.WriteString("\n")
-	b.WriteString(dim.Render("  │") + fg.Render("    validation logic and refreshing expired tokens...   ") + dim.Render("│"))
-	b.WriteString("\n")
-	b.WriteString(dim.Render("  │") + fg.Render("                                                       ") + dim.Render("│"))
-	b.WriteString("\n")
-	b.WriteString(dim.Render("  ╰──────────────────────────────────────────────────────╯"))
+	b.WriteString(fg.Render("  Let me start by reading the current implementation."))
 	b.WriteString("\n\n")
-	b.WriteString(dim.Render("  press any key to return to dashboard"))
+
+	// Tool: Read file
+	b.WriteString(toolBorder.Render("  ╭─ ") + cyan.Render("Read") + dim.Render(" src/auth/middleware.go"))
+	b.WriteString("\n")
+	b.WriteString(toolBorder.Render("  │ ") + dim.Render("   1  package auth"))
+	b.WriteString("\n")
+	b.WriteString(toolBorder.Render("  │ ") + dim.Render("   2  "))
+	b.WriteString("\n")
+	b.WriteString(toolBorder.Render("  │ ") + dim.Render("   3  func SessionMiddleware(next http.Handler) http.Handler {"))
+	b.WriteString("\n")
+	b.WriteString(toolBorder.Render("  │ ") + dim.Render("   4      return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {"))
+	b.WriteString("\n")
+	b.WriteString(toolBorder.Render("  │ ") + dim.Render("   5          cookie, err := r.Cookie(\"session_id\")"))
+	b.WriteString("\n")
+	b.WriteString(toolBorder.Render("  │ ") + dim.Render("  ...  (42 lines)"))
+	b.WriteString("\n")
+	b.WriteString(toolBorder.Render("  ╰─"))
+	b.WriteString("\n\n")
+
+	// More response
+	b.WriteString(fg.Render("  Now I'll update it to use JWT verification:"))
+	b.WriteString("\n\n")
+
+	// Tool: Edit file
+	b.WriteString(toolBorder.Render("  ╭─ ") + yellow.Render("Edit") + dim.Render(" src/auth/middleware.go"))
+	b.WriteString("\n")
+	b.WriteString(toolBorder.Render("  │ ") + green.Render(" + ") + fg.Render("func JWTMiddleware(secret []byte) func(http.Handler) http.Handler {"))
+	b.WriteString("\n")
+	b.WriteString(toolBorder.Render("  │ ") + green.Render(" + ") + fg.Render("    return func(next http.Handler) http.Handler {"))
+	b.WriteString("\n")
+	b.WriteString(toolBorder.Render("  │ ") + green.Render(" + ") + fg.Render("        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {"))
+	b.WriteString("\n")
+	b.WriteString(toolBorder.Render("  │ ") + green.Render(" + ") + fg.Render("            token := r.Header.Get(\"Authorization\")"))
+	b.WriteString("\n")
+	b.WriteString(toolBorder.Render("  │ ") + green.Render(" + ") + fg.Render("            claims, err := validateJWT(token, secret)"))
+	b.WriteString("\n")
+	b.WriteString(toolBorder.Render("  │ ") + dim.Render("  ... (+18 lines)"))
+	b.WriteString("\n")
+	b.WriteString(toolBorder.Render("  ╰─"))
+	b.WriteString("\n\n")
+
+	// Prompt
+	b.WriteString(purple.Render(" ❯ "))
+	b.WriteString(dim.Render("press any key to return to c9s dashboard"))
+
 	return b.String()
 }
 
