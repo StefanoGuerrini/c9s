@@ -146,6 +146,17 @@ type model struct {
 	renameInput   textinput.Model
 	renameSession *claude.SessionInfo // session being renamed
 
+	// Project picker
+	pickingProject       bool
+	projectDirs          []string             // full paths, [0] = work_dir root, [1:] = subdirs sorted by last used
+	projectLastUsed      map[string]time.Time // dir → most recent session Modified
+	projectCursor        int
+	projectFilter        string // typed search filter
+	projectWithEffort    bool   // true when triggered via N (chain into effort picker)
+	projectEffortStep    bool   // true when showing effort options inside the picker
+	projectModelStep     bool   // true when showing model options inside the picker
+	projectEffort        string // selected effort (stored between steps)
+
 	// Effort picker
 	pickingEffort bool
 	effortWorkDir string // project dir for the new session
@@ -364,6 +375,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.configScreen {
 			return m.updateConfig(msg)
 		}
+		if m.pickingProject {
+			return m.updateProjectPicker(msg)
+		}
 		if m.pickingEffort {
 			return m.updateEffortPicker(msg)
 		}
@@ -498,9 +512,9 @@ func (m model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		return m.openSession(items)
 	case "n":
-		return m.newSession(items, "")
+		return m.startProjectPicker(items, false)
 	case "N":
-		return m.startEffortPicker(items)
+		return m.startProjectPicker(items, true)
 	case "x":
 		return m.closeWindow(items)
 	case "R":
@@ -536,7 +550,7 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 	if m.cursor >= 0 && m.cursor < len(items) && items[m.cursor].isWorktreeRow {
 		wt := items[m.cursor].worktree
 		m.effortWorkDir = wt.Path
-		return m.newSession(nil, "")
+		return m.newSession(nil, "", "")
 	}
 
 	s := m.selectedSession(items)
@@ -606,7 +620,7 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 }
 
 // newSession creates a brand new claude session in the selected project.
-func (m model) newSession(items []displayItem, effort string) (tea.Model, tea.Cmd) {
+func (m model) newSession(items []displayItem, effort, modelID string) (tea.Model, tea.Cmd) {
 	if !m.insideTmux {
 		return m, statusCmd("tmux required — run c9s outside tmux to auto-bootstrap", true)
 	}
@@ -629,6 +643,9 @@ func (m model) newSession(items []displayItem, effort string) (tea.Model, tea.Cm
 	cmd := "claude"
 	if effort != "" {
 		cmd = fmt.Sprintf("claude --effort %s", effort)
+	}
+	if modelID != "" {
+		cmd = fmt.Sprintf("ANTHROPIC_MODEL=%s %s", modelID, cmd)
 	}
 
 	// Name the window with project + short timestamp to distinguish multiple sessions.
@@ -678,7 +695,7 @@ func (m model) updateEffortPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	if effort, ok := efforts[key]; ok {
 		m.pickingEffort = false
-		return m.newSession(nil, effort)
+		return m.newSession(nil, effort, "")
 	}
 	if key == "esc" || key == "q" {
 		m.pickingEffort = false
@@ -686,6 +703,371 @@ func (m model) updateEffortPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// startProjectPicker shows the project directory picker when work_dir is configured.
+// If work_dir is empty, falls through to newSession or startEffortPicker directly.
+func (m model) startProjectPicker(items []displayItem, withEffort bool) (tea.Model, tea.Cmd) {
+	if cfg.WorkDir == "" {
+		if withEffort {
+			return m.startEffortPicker(items)
+		}
+		return m.newSession(items, "", "")
+	}
+
+	entries, err := os.ReadDir(cfg.WorkDir)
+	if err != nil {
+		if withEffort {
+			return m.startEffortPicker(items)
+		}
+		return m.newSession(items, "", "")
+	}
+
+	// Collect subdirectories (skip hidden).
+	var dirs []string
+	for _, e := range entries {
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+			dirs = append(dirs, filepath.Join(cfg.WorkDir, e.Name()))
+		}
+	}
+
+	// Build last-used map from sessions.
+	lastUsed := make(map[string]time.Time)
+	for _, s := range m.sessions {
+		if s.ProjectPath != "" {
+			if t, ok := lastUsed[s.ProjectPath]; !ok || s.Modified.After(t) {
+				lastUsed[s.ProjectPath] = s.Modified
+			}
+		}
+	}
+
+	// Sort: dirs with recent sessions first (newest first), then dirs without sessions (alphabetical).
+	sort.SliceStable(dirs, func(i, j int) bool {
+		ti, oki := lastUsed[dirs[i]]
+		tj, okj := lastUsed[dirs[j]]
+		if oki && okj {
+			return ti.After(tj)
+		}
+		if oki {
+			return true
+		}
+		if okj {
+			return false
+		}
+		return dirs[i] < dirs[j]
+	})
+
+	// Prepend root (work_dir itself) as first entry.
+	m.projectDirs = append([]string{cfg.WorkDir}, dirs...)
+	m.projectLastUsed = lastUsed
+	m.projectCursor = 0
+	m.pickingProject = true
+	m.projectWithEffort = withEffort
+	return m, nil
+}
+
+// filteredProjectDirs returns projectDirs filtered by the current search string.
+func (m model) filteredProjectDirs() []string {
+	if m.projectFilter == "" {
+		return m.projectDirs
+	}
+	f := strings.ToLower(m.projectFilter)
+	var out []string
+	for _, dir := range m.projectDirs {
+		name := filepath.Base(dir)
+		if dir == cfg.WorkDir {
+			name = ". (root)"
+		}
+		if strings.Contains(strings.ToLower(name), f) {
+			out = append(out, dir)
+		}
+	}
+	return out
+}
+
+// updateProjectPicker handles key input during project directory selection.
+func (m model) updateProjectPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+
+	// Model step: pick model after effort.
+	if m.projectModelStep {
+		models := map[string]string{
+			"1": "claude-opus-4-6",
+			"2": "claude-sonnet-4-6",
+			"3": "claude-haiku-4-5-20251001",
+			"4": "", // default (no override)
+		}
+		if modelID, ok := models[key]; ok {
+			m.pickingProject = false
+			m.projectModelStep = false
+			return m.newSession(nil, m.projectEffort, modelID)
+		}
+		if key == "esc" {
+			m.projectModelStep = false
+			m.projectEffortStep = true
+		}
+		return m, nil
+	}
+
+	// Effort step: pick effort level inside the same overlay.
+	if m.projectEffortStep {
+		efforts := map[string]string{"1": "low", "2": "medium", "3": "high", "4": "max"}
+		if effort, ok := efforts[key]; ok {
+			m.projectEffortStep = false
+			m.projectEffort = effort
+			m.projectModelStep = true
+			return m, nil
+		}
+		if key == "esc" {
+			// Go back to project list.
+			m.projectEffortStep = false
+			m.projectCursor = 0
+		}
+		return m, nil
+	}
+
+	filtered := m.filteredProjectDirs()
+
+	switch key {
+	case "down":
+		if m.projectCursor < len(filtered)-1 {
+			m.projectCursor++
+		}
+	case "up":
+		if m.projectCursor > 0 {
+			m.projectCursor--
+		}
+	case "enter":
+		if len(filtered) > 0 && m.projectCursor < len(filtered) {
+			m.effortWorkDir = filtered[m.projectCursor]
+			m.projectFilter = ""
+			if m.projectWithEffort {
+				// Transition to effort step inside the same overlay.
+				m.projectEffortStep = true
+				return m, nil
+			}
+			m.pickingProject = false
+			return m.newSession(nil, "", "")
+		}
+	case "esc":
+		m.pickingProject = false
+		m.projectDirs = nil
+		m.projectLastUsed = nil
+		m.projectFilter = ""
+	case "backspace":
+		if len(m.projectFilter) > 0 {
+			m.projectFilter = m.projectFilter[:len(m.projectFilter)-1]
+			m.projectCursor = 0
+		}
+	default:
+		if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
+			m.projectFilter += key
+			m.projectCursor = 0
+		}
+	}
+	return m, nil
+}
+
+// overlayProjectPicker composites the project picker as a floating box
+// on top of the existing dashboard output.
+func (m model) overlayProjectPicker(base string) string {
+	boxW := 52
+	if m.width > 90 {
+		boxW = 62
+	}
+	innerW := boxW - 2 // inside the │ borders
+
+	bc := lipgloss.Color(statusColors().Accent)
+	bdr := lipgloss.NewStyle().Foreground(bc)
+
+	// Helper: build a bordered row with exact inner width.
+	row := func(content string) string {
+		vis := lipgloss.Width(content)
+		pad := innerW - vis
+		if pad < 0 {
+			pad = 0
+		}
+		return bdr.Render("│") + content + strings.Repeat(" ", pad) + bdr.Render("│")
+	}
+	emptyRow := row("")
+
+	var lines []string
+
+	if m.projectModelStep {
+		// Model selection step.
+		projName := filepath.Base(m.effortWorkDir)
+		title := fmt.Sprintf(" %s · %s — model ", projName, m.projectEffort)
+		barW := boxW - 2 - len([]rune(title))
+		if barW < 0 {
+			barW = 0
+		}
+		lines = append(lines, bdr.Render("╭"+title+strings.Repeat("─", barW)+"╮"))
+		lines = append(lines, emptyRow)
+
+		modelOpts := []struct{ key, label string }{
+			{"1", "opus"},
+			{"2", "sonnet"},
+			{"3", "haiku"},
+			{"4", "default (no override)"},
+		}
+		for _, o := range modelOpts {
+			label := fmt.Sprintf(" %s  %s", helpKeyStyle.Render(o.key), o.label)
+			lines = append(lines, row(label))
+		}
+
+		lines = append(lines, emptyRow)
+		lines = append(lines, row(dimStyle.Render(" 1-4 select  esc back")))
+		lines = append(lines, bdr.Render("╰"+strings.Repeat("─", boxW-2)+"╯"))
+	} else if m.projectEffortStep {
+		// Effort selection step.
+		projName := filepath.Base(m.effortWorkDir)
+		title := " " + projName + " — effort "
+		barW := boxW - 2 - len([]rune(title))
+		if barW < 0 {
+			barW = 0
+		}
+		lines = append(lines, bdr.Render("╭"+title+strings.Repeat("─", barW)+"╮"))
+		lines = append(lines, emptyRow)
+
+		effortOpts := []struct{ key, label string }{
+			{"1", "low"},
+			{"2", "medium"},
+			{"3", "high"},
+			{"4", "max"},
+		}
+		for _, e := range effortOpts {
+			label := fmt.Sprintf(" %s  %s", helpKeyStyle.Render(e.key), e.label)
+			lines = append(lines, row(label))
+		}
+
+		lines = append(lines, emptyRow)
+		lines = append(lines, row(dimStyle.Render(" 1-4 select  esc back")))
+		lines = append(lines, bdr.Render("╰"+strings.Repeat("─", boxW-2)+"╯"))
+	} else {
+		// Project directory selection.
+		title := " select project "
+		if m.projectFilter != "" {
+			title = fmt.Sprintf(" %s▏", m.projectFilter)
+		}
+		barW := boxW - 2 - len([]rune(title))
+		if barW < 0 {
+			barW = 0
+		}
+		lines = append(lines, bdr.Render("╭"+title+strings.Repeat("─", barW)+"╮"))
+		lines = append(lines, emptyRow)
+
+		filtered := m.filteredProjectDirs()
+		if len(filtered) == 0 {
+			lines = append(lines, row(dimStyle.Render(" no matching directories")))
+		} else {
+			maxVis := m.height/2 - 6
+			if maxVis < 5 {
+				maxVis = 5
+			}
+			if maxVis > len(filtered) {
+				maxVis = len(filtered)
+			}
+			scroll := 0
+			if m.projectCursor >= maxVis {
+				scroll = m.projectCursor - maxVis + 1
+			}
+			end := scroll + maxVis
+			if end > len(filtered) {
+				end = len(filtered)
+			}
+
+			for i := scroll; i < end; i++ {
+				dir := filtered[i]
+				name := filepath.Base(dir)
+				if dir == cfg.WorkDir {
+					name = ". (root)"
+				}
+
+				hint := ""
+				if t, ok := m.projectLastUsed[dir]; ok {
+					hint = fmtTimeAgo(t)
+				}
+
+				hintW := len(hint)
+				nameMax := innerW - hintW - 3 // 1 leading space + 1 gap + 1 trailing
+				if nameMax < 8 {
+					nameMax = 8
+				}
+				nr := []rune(name)
+				if len(nr) > nameMax {
+					name = string(nr[:nameMax-1]) + "…"
+				}
+
+				gap := innerW - 2 - len([]rune(name)) - hintW
+				if gap < 1 {
+					gap = 1
+				}
+
+				var content string
+				if hint != "" {
+					content = " " + name + strings.Repeat(" ", gap) + dimStyle.Render(hint) + " "
+				} else {
+					content = " " + name + strings.Repeat(" ", gap+hintW) + " "
+				}
+
+				if i == m.projectCursor {
+					// Pad content to innerW then apply selected style.
+					vis := lipgloss.Width(content)
+					if vis < innerW {
+						content += strings.Repeat(" ", innerW-vis)
+					}
+					content = selectedStyle.Render(content)
+				}
+				lines = append(lines, row(content))
+			}
+		}
+
+		lines = append(lines, emptyRow)
+		foot := " ↑/↓ navigate  enter select  esc cancel"
+		if m.projectFilter != "" {
+			foot = " ↑/↓ enter  backspace  esc"
+		}
+		lines = append(lines, row(dimStyle.Render(foot)))
+		lines = append(lines, bdr.Render("╰"+strings.Repeat("─", boxW-2)+"╯"))
+	}
+
+	// Overlay: replace full base lines starting at row 2.
+	baseLines := strings.Split(base, "\n")
+	startRow := 2
+	for i, pline := range lines {
+		r := startRow + i
+		if r < len(baseLines) {
+			baseLines[r] = "  " + pline
+		}
+	}
+	return strings.Join(baseLines, "\n")
+}
+
+// fmtTimeAgo formats a time as a human-readable "X ago" string.
+func fmtTimeAgo(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		m := int(d.Minutes())
+		if m == 1 {
+			return "1 min ago"
+		}
+		return fmt.Sprintf("%d min ago", m)
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		if h == 1 {
+			return "1 hour ago"
+		}
+		return fmt.Sprintf("%d hours ago", h)
+	default:
+		days := int(d.Hours() / 24)
+		if days == 1 {
+			return "1 day ago"
+		}
+		return fmt.Sprintf("%d days ago", days)
+	}
 }
 
 // getWorktrees returns cached worktrees for a project dir.
@@ -1890,6 +2272,12 @@ func (m model) View() tea.View {
 		out += "\n"
 		lines++
 	}
+
+	// Overlay project picker as a floating box on top of the dashboard.
+	if m.pickingProject {
+		out = m.overlayProjectPicker(out)
+	}
+
 	return altView(out)
 }
 
@@ -2016,6 +2404,17 @@ func fmtTime(t time.Time) string {
 }
 
 func (m model) footer() string {
+	if m.pickingProject {
+		f := ""
+		if m.projectFilter != "" {
+			f = " /  " + m.projectFilter
+		}
+		return helpStyle.Render(" " +
+			helpKeyStyle.Render("↑/↓") + " navigate  " +
+			helpKeyStyle.Render("enter") + " select  " +
+			"type to filter  " +
+			helpKeyStyle.Render("esc") + " cancel" + f)
+	}
 	if m.pickingEffort {
 		return helpStyle.Render(" effort: " +
 			helpKeyStyle.Render("1") + " low  " +

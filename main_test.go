@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -333,6 +335,110 @@ func TestSelectedSessionPreservedOnReorder(t *testing.T) {
 	}
 	if m.cursor != 2 {
 		t.Errorf("cursor = %d, want 2", m.cursor)
+	}
+}
+
+func TestStartProjectPickerOrdering(t *testing.T) {
+	now := time.Now()
+	tmpDir := t.TempDir()
+	// Create subdirectories.
+	os.Mkdir(filepath.Join(tmpDir, "project-a"), 0755)
+	os.Mkdir(filepath.Join(tmpDir, "project-b"), 0755)
+	os.Mkdir(filepath.Join(tmpDir, "project-c"), 0755)
+
+	// Save and restore config.
+	oldWorkDir := cfg.WorkDir
+	cfg.WorkDir = tmpDir
+	defer func() { cfg.WorkDir = oldWorkDir }()
+
+	m := &model{
+		sessions: []claude.SessionInfo{
+			{ProjectPath: filepath.Join(tmpDir, "project-a"), Modified: now.Add(-2 * time.Hour)},
+			{ProjectPath: filepath.Join(tmpDir, "project-b"), Modified: now.Add(-10 * time.Minute)},
+			// project-c has no sessions
+		},
+		managedWindows:    make(map[string]managedWindow),
+		replacedSessions:  make(map[string]bool),
+		expandedWorktrees: make(map[int]bool),
+		worktreeCache:     make(map[string][]git.Worktree),
+	}
+
+	result, _ := m.startProjectPicker(nil, false)
+	rm := result.(model)
+
+	if !rm.pickingProject {
+		t.Fatal("expected pickingProject to be true")
+	}
+	// [0] = root, then sorted by last used: project-b (10m), project-a (2h), project-c (none)
+	if len(rm.projectDirs) != 4 {
+		t.Fatalf("expected 4 dirs, got %d: %v", len(rm.projectDirs), rm.projectDirs)
+	}
+	if rm.projectDirs[0] != tmpDir {
+		t.Errorf("first entry should be root, got %s", rm.projectDirs[0])
+	}
+	if filepath.Base(rm.projectDirs[1]) != "project-b" {
+		t.Errorf("second should be project-b (most recent), got %s", filepath.Base(rm.projectDirs[1]))
+	}
+	if filepath.Base(rm.projectDirs[2]) != "project-a" {
+		t.Errorf("third should be project-a, got %s", filepath.Base(rm.projectDirs[2]))
+	}
+	if filepath.Base(rm.projectDirs[3]) != "project-c" {
+		t.Errorf("fourth should be project-c (no sessions), got %s", filepath.Base(rm.projectDirs[3]))
+	}
+}
+
+func TestStartProjectPickerNoWorkDir(t *testing.T) {
+	oldWorkDir := cfg.WorkDir
+	cfg.WorkDir = ""
+	defer func() { cfg.WorkDir = oldWorkDir }()
+
+	m := &model{
+		insideTmux:        true,
+		managedWindows:    make(map[string]managedWindow),
+		replacedSessions:  make(map[string]bool),
+		expandedWorktrees: make(map[int]bool),
+		worktreeCache:     make(map[string][]git.Worktree),
+	}
+
+	result, _ := m.startProjectPicker(nil, false)
+	rm := result.(model)
+
+	// Should skip picker entirely.
+	if rm.pickingProject {
+		t.Error("expected pickingProject to be false when work_dir is empty")
+	}
+}
+
+func TestProjectPickerFilter(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Mkdir(filepath.Join(tmpDir, "webapp"), 0755)
+	os.Mkdir(filepath.Join(tmpDir, "api-server"), 0755)
+	os.Mkdir(filepath.Join(tmpDir, "mobile-app"), 0755)
+
+	oldWorkDir := cfg.WorkDir
+	cfg.WorkDir = tmpDir
+	defer func() { cfg.WorkDir = oldWorkDir }()
+
+	m := &model{
+		managedWindows:    make(map[string]managedWindow),
+		replacedSessions:  make(map[string]bool),
+		expandedWorktrees: make(map[int]bool),
+		worktreeCache:     make(map[string][]git.Worktree),
+	}
+
+	result, _ := m.startProjectPicker(nil, false)
+	rm := result.(model)
+
+	// No filter → all dirs (root + 3 subdirs).
+	if got := len(rm.filteredProjectDirs()); got != 4 {
+		t.Errorf("no filter: got %d dirs, want 4", got)
+	}
+
+	// Filter "app" → matches "webapp", "mobile-app".
+	rm.projectFilter = "app"
+	filtered := rm.filteredProjectDirs()
+	if len(filtered) != 2 {
+		t.Errorf("filter 'app': got %d dirs, want 2: %v", len(filtered), filtered)
 	}
 }
 
