@@ -234,3 +234,51 @@ func DemoSessions() []SessionInfo {
 		},
 	}
 }
+
+// DemoUsageHistory returns fake usage history data for demo/screenshot purposes.
+func DemoUsageHistory() []UsageDataPoint {
+	now := time.Now().UTC()
+	var points []UsageDataPoint
+
+	// Generate 14 days of data, 3 points per day (every ~5 hours).
+	for d := 13; d >= 0; d-- {
+		for h := 0; h < 3; h++ {
+			t := now.Add(-time.Duration(d)*24*time.Hour + time.Duration(h*8)*time.Hour)
+
+			// Simulate realistic usage patterns: busier during weekdays.
+			dayOfWeek := t.Weekday()
+			weekday := dayOfWeek != time.Saturday && dayOfWeek != time.Sunday
+			baseFive := 15.0 + float64(d%3)*10
+			baseSeven := 8.0 + float64(d%5)*4
+			if weekday {
+				baseFive += 20
+				baseSeven += 10
+			}
+			// Add variation per point within the day.
+			baseFive += float64(h) * 8
+			baseSeven += float64(h) * 3
+			if baseFive > 95 {
+				baseFive = 95
+			}
+			if baseSeven > 60 {
+				baseSeven = 60
+			}
+
+			tokens := 150000 + d*25000 + h*50000
+			opusTokens := int(float64(tokens) * 0.85)
+			sonnetTokens := tokens - opusTokens
+
+			points = append(points, UsageDataPoint{
+				Time:     t,
+				FiveHour: baseFive,
+				SevenDay: baseSeven,
+				Tokens:   tokens,
+				Models: map[string]int{
+					"claude-opus-4-6":   opusTokens,
+					"claude-sonnet-4-6": sonnetTokens,
+				},
+			})
+		}
+	}
+	return points
+}

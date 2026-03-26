@@ -6,7 +6,7 @@ Terminal dashboard for Claude Code.
 ![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
-![c9s dashboard](docs/dashboard.png)
+![c9s demo](docs/demo.gif)
 
 > **Beta** -- c9s is in early development and still needs validation. Feel free to use it! It reads local files and optionally fetches your usage percentage via Claude Code's OAuth token. It never stores credentials and adds zero cost to your Claude usage. Feedback and contributions are welcome!
 

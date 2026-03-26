@@ -907,7 +907,12 @@ func (m model) updateUsage(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // usageView renders the usage history screen.
 func (m model) usageView() string {
-	points := claude.LoadUsageHistory()
+	var points []claude.UsageDataPoint
+	if m.demoMode {
+		points = claude.DemoUsageHistory()
+	} else {
+		points = claude.LoadUsageHistory()
+	}
 
 	var b strings.Builder
 
