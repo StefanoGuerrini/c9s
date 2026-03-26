@@ -234,6 +234,121 @@ func TestReadTokenUsageMissingFile(t *testing.T) {
 	}
 }
 
+func TestGetModelBreakdown(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	projDir := ProjectDir("/Users/test/proj")
+	os.MkdirAll(projDir, 0755)
+
+	// Two sessions: one with opus, one with sonnet.
+	jsonl1 := `{"message":{"model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":200,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+{"message":{"model":"claude-opus-4-6","usage":{"input_tokens":50,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+`
+	jsonl2 := `{"message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":30,"output_tokens":70,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+`
+	os.WriteFile(filepath.Join(projDir, "sess-a.jsonl"), []byte(jsonl1), 0644)
+	os.WriteFile(filepath.Join(projDir, "sess-b.jsonl"), []byte(jsonl2), 0644)
+
+	fi1, _ := os.Stat(filepath.Join(projDir, "sess-a.jsonl"))
+	fi2, _ := os.Stat(filepath.Join(projDir, "sess-b.jsonl"))
+	s1 := &SessionInfo{SessionID: "sess-a", Dir: projDir, FileMtime: fi1.ModTime()}
+	s2 := &SessionInfo{SessionID: "sess-b", Dir: projDir, FileMtime: fi2.ModTime()}
+	readTokenUsage(s1)
+	readTokenUsage(s2)
+
+	breakdown := GetModelBreakdown([]SessionInfo{*s1, *s2})
+
+	if breakdown["claude-opus-4-6"] != 400 {
+		t.Errorf("opus tokens = %d, want 400", breakdown["claude-opus-4-6"])
+	}
+	if breakdown["claude-sonnet-4-6"] != 100 {
+		t.Errorf("sonnet tokens = %d, want 100", breakdown["claude-sonnet-4-6"])
+	}
+}
+
+func TestGetModelBreakdownEmpty(t *testing.T) {
+	// No sessions → empty map, no panic.
+	breakdown := GetModelBreakdown(nil)
+	if len(breakdown) != 0 {
+		t.Errorf("expected empty breakdown, got %v", breakdown)
+	}
+}
+
+func TestGetLastModel(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	projDir := ProjectDir("/Users/test/proj-lm")
+	os.MkdirAll(projDir, 0755)
+
+	// Two messages: opus first, then sonnet. Last model should be sonnet.
+	jsonl := `{"message":{"model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":200,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+{"message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":30,"output_tokens":70,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+`
+	os.WriteFile(filepath.Join(projDir, "sess-lm.jsonl"), []byte(jsonl), 0644)
+	fi, _ := os.Stat(filepath.Join(projDir, "sess-lm.jsonl"))
+	readTokenUsage(&SessionInfo{SessionID: "sess-lm", Dir: projDir, FileMtime: fi.ModTime()})
+
+	if got := GetLastModel("sess-lm"); got != "claude-sonnet-4-6" {
+		t.Errorf("GetLastModel = %q, want claude-sonnet-4-6", got)
+	}
+
+	// Non-existent session → empty.
+	if got := GetLastModel("nonexistent"); got != "" {
+		t.Errorf("expected empty for missing session, got %q", got)
+	}
+}
+
+func TestGetSupersededSessions(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	projDir := ProjectDir("/Users/test/proj")
+	os.MkdirAll(projDir, 0755)
+
+	// Chain: sess-a → sess-b → sess-c (each forked from previous).
+	// Write files with increasing mtimes.
+	jsonlA := `{"message":{"usage":{"input_tokens":10,"output_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+`
+	jsonlB := `{"forkedFrom":{"sessionId":"sess-a"},"message":{"usage":{"input_tokens":10,"output_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+`
+	jsonlC := `{"forkedFrom":{"sessionId":"sess-b"},"message":{"usage":{"input_tokens":10,"output_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+`
+	os.WriteFile(filepath.Join(projDir, "sess-a.jsonl"), []byte(jsonlA), 0644)
+	// Set older mtime for sess-a to simulate it being older.
+	oldTime := time.Now().Add(-1 * time.Hour)
+	os.Chtimes(filepath.Join(projDir, "sess-a.jsonl"), oldTime, oldTime)
+
+	os.WriteFile(filepath.Join(projDir, "sess-b.jsonl"), []byte(jsonlB), 0644)
+	midTime := time.Now().Add(-30 * time.Minute)
+	os.Chtimes(filepath.Join(projDir, "sess-b.jsonl"), midTime, midTime)
+
+	os.WriteFile(filepath.Join(projDir, "sess-c.jsonl"), []byte(jsonlC), 0644)
+
+	fiA, _ := os.Stat(filepath.Join(projDir, "sess-a.jsonl"))
+	fiB, _ := os.Stat(filepath.Join(projDir, "sess-b.jsonl"))
+	fiC, _ := os.Stat(filepath.Join(projDir, "sess-c.jsonl"))
+	readTokenUsage(&SessionInfo{SessionID: "sess-a", Dir: projDir, FileMtime: fiA.ModTime()})
+	readTokenUsage(&SessionInfo{SessionID: "sess-b", Dir: projDir, FileMtime: fiB.ModTime()})
+	readTokenUsage(&SessionInfo{SessionID: "sess-c", Dir: projDir, FileMtime: fiC.ModTime()})
+
+	superseded := GetSupersededSessions()
+
+	// A is superseded by B (B has newer mtime).
+	if !superseded["sess-a"] {
+		t.Error("sess-a should be superseded")
+	}
+	// B is superseded by C (C has newer mtime).
+	if !superseded["sess-b"] {
+		t.Error("sess-b should be superseded")
+	}
+	// C has no successor.
+	if superseded["sess-c"] {
+		t.Error("sess-c should NOT be superseded")
+	}
+}
+
 func TestStatusString(t *testing.T) {
 	tests := []struct {
 		s    Status

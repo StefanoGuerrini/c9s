@@ -18,6 +18,7 @@ type Config struct {
 	WorkDir        string `json:"work_dir"`         // default working directory for new sessions (empty = cwd)
 	KeepAlive      string `json:"keep_alive"`       // "off" (default) or "on" — keep sessions running on quit
 	StatusUsage    string  `json:"status_usage"`     // "off", "percent" (default), "cost,percent", "all", etc.
+	StatusModel    string  `json:"status_model"`     // "on" (default) or "off" — show model name in status bar
 	CostInput      float64 `json:"cost_input"`      // $/M input+cache_write tokens (default: 3.0 = Sonnet)
 	CostOutput     float64 `json:"cost_output"`     // $/M output tokens (default: 15.0 = Sonnet)
 	CostCache      float64 `json:"cost_cache"`      // $/M cache read tokens (default: 0.30 = Sonnet)
@@ -91,6 +92,7 @@ func Default() Config {
 		ScrollSpeed:    3,
 		KeepAlive:      "off",
 		StatusUsage:    "percent",
+		StatusModel:    "on",
 		CostInput:      3.0,
 		CostOutput:     15.0,
 		CostCache:      0.30,
@@ -197,6 +199,15 @@ func EditableFields() []Field {
 			Get:     func(c Config) string { return c.StatusUsage },
 			Set: func(c *Config, v string) {
 				c.StatusUsage = v
+			}},
+		{Section: "General", Label: "Status bar model", Key: "status_model",
+			Desc:    "Show the current model (opus, sonnet, ...) in the tmux status bar",
+			Options: []string{"on", "off"},
+			Get:     func(c Config) string { return c.StatusModel },
+			Set: func(c *Config, v string) {
+				if v == "on" || v == "off" {
+					c.StatusModel = v
+				}
 			}},
 		// Cost estimation
 		{Section: "Cost estimation", Label: "$/M input", Key: "cost_input",

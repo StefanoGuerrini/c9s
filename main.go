@@ -224,9 +224,50 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tickMsg:
 		if !m.demoMode {
+			// Capture selected session before any changes so we can restore
+			// cursor position after all updates (session reorder + hidden sessions).
+			var selectedID string
+			if s := m.selectedSession(m.items()); s != nil {
+				selectedID = s.SessionID
+			}
+
 			sessions, err := claude.ListAllSessions()
 			if err == nil && sessionsChanged(m.sessions, sessions) {
 				m.sessions = sessions
+			}
+			// Reconcile managed windows FIRST so a forked session's window is
+			// re-keyed to the new session ID before superseded detection runs.
+			// If superseded detection ran first it would kill the active window
+			// before reconcile could re-key it to the new session ID.
+			if m.insideTmux && len(m.managedWindows) > 0 {
+				prevReplaced := len(m.replacedSessions)
+				m.reconcileWindows(m.sessions)
+				if len(m.replacedSessions) > prevReplaced {
+					m.saveDashboardState()
+				}
+			}
+			// Hide sessions that have been superseded by a fork/compaction.
+			// Also close their tmux windows so Ctrl+n/p won't navigate to stale sessions.
+			// By this point, reconcileWindows has already re-keyed any active windows,
+			// so only truly orphaned windows get closed here.
+			for id := range claude.GetSupersededSessions() {
+				if !m.replacedSessions[id] {
+					m.replacedSessions[id] = true
+					if mw, ok := m.managedWindows[id]; ok {
+						tmux.KillWindow(mw.windowID)
+						delete(m.managedWindows, id)
+					}
+				}
+			}
+			// Restore cursor to the selected session after all list changes.
+			if selectedID != "" {
+				for i, item := range m.items() {
+					if !item.isHeader && !item.isWorktreeRow && item.session.SessionID == selectedID {
+						m.cursor = i
+						break
+					}
+				}
+				m.adjustScroll()
 			}
 			// Reload config if changed on disk (e.g. after editing via 'c').
 			if newCfg, changed := config.LoadIfChanged(); changed {
@@ -242,16 +283,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		// Reconcile managed windows with actual running sessions.
-		// Handles new sessions (tmpKey) and forked sessions (stale sessionID).
-		if m.insideTmux && len(m.managedWindows) > 0 {
-			prevReplaced := len(m.replacedSessions)
-			m.reconcileWindows(m.sessions)
-			if len(m.replacedSessions) > prevReplaced {
-				m.saveDashboardState()
-			}
-		}
-
 		// Update pane statuses for managed windows.
 		for key, mw := range m.managedWindows {
 			if !tmux.WindowExists(mw.windowID) {
@@ -300,7 +331,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				for _, s := range m.sessions {
 					totalTokens += s.TotalTokens()
 				}
-				claude.RecordUsage(result.Usage, totalTokens)
+				claude.RecordUsage(result.Usage, totalTokens, claude.GetModelBreakdown(m.sessions))
 				m.lastRecordedFetch = result.Fetched
 			}
 		}
@@ -544,6 +575,8 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 		return m, statusCmd(fmt.Sprintf("failed to open window: %v", err), true)
 	}
 
+	// Tag the window with the session ID so we can recover it after restart.
+	tmux.SetWindowEnv(windowID, "session-id", s.SessionID)
 	m.managedWindows[s.SessionID] = managedWindow{
 		windowID:  windowID,
 		sessionID: s.SessionID,
@@ -768,6 +801,44 @@ func (m *model) reconcileWindows(sessions []claude.SessionInfo) {
 	}
 	for k, v := range toAdd {
 		m.managedWindows[k] = v
+		// Update the window tag so recovery after restart uses the new session ID.
+		tmux.SetWindowEnv(v.windowID, "session-id", k)
+	}
+}
+
+// reconcileStartupWindows scans existing tmux windows and re-populates
+// managedWindows for windows that were opened by a previous c9s run.
+// This prevents duplicate windows when the user re-opens a session after restart.
+// Windows are NOT killed here — the normal tick handler (reconcileWindows +
+// GetSupersededSessions) handles cleanup once sessions are confirmed stale.
+func (m *model) reconcileStartupWindows(sessions []claude.SessionInfo) {
+	if !m.insideTmux {
+		return
+	}
+	windows, err := tmux.ListWindows()
+	if err != nil {
+		return
+	}
+	sessionByID := make(map[string]*claude.SessionInfo)
+	for i := range sessions {
+		sessionByID[sessions[i].SessionID] = &sessions[i]
+	}
+	for _, w := range windows {
+		if w.Name == tmux.DashboardWindow || w.SessionID == "" {
+			continue
+		}
+		// Re-populate managedWindows for tagged windows whose session is still known.
+		if s, ok := sessionByID[w.SessionID]; ok {
+			if _, alreadyTracked := m.managedWindows[w.SessionID]; !alreadyTracked {
+				m.managedWindows[w.SessionID] = managedWindow{
+					windowID:  w.ID,
+					sessionID: w.SessionID,
+					project:   s.ProjectPath,
+				}
+			}
+		}
+		// Windows for unknown/superseded sessions are left alone here.
+		// The first tick will detect them via GetSupersededSessions and close them.
 	}
 }
 
@@ -871,8 +942,12 @@ func (m model) usageView() string {
 		// Aggregate data points into rows.
 		rows := m.aggregateUsageRows(points)
 
-		// Header
-		b.WriteString(dimStyle.Render("  Date          5h peak              7d last              Tokens"))
+		// Header — built the same way as data rows so bar-char widths match.
+		hdr := "  " + fmt.Sprintf("%-14s", "Date") +
+			fmt.Sprintf("%-12s", "5h peak") + fmt.Sprintf("%-8s", "") +
+			fmt.Sprintf("%-12s", "7d last") + fmt.Sprintf("%-8s", "") +
+			fmt.Sprintf("%8s", "Tokens") + "    Models"
+		b.WriteString(dimStyle.Render(hdr))
 		b.WriteString("\n")
 
 		maxRows := m.height - 6 // title + header + footer + padding
@@ -895,6 +970,10 @@ func (m model) usageView() string {
 			} else {
 				b.WriteString(dimStyle.Render("       —"))
 			}
+			if len(r.models) > 0 {
+				b.WriteString("    ")
+				b.WriteString(dimStyle.Render(formatModelPcts(r.models)))
+			}
 			b.WriteString("\n")
 		}
 	}
@@ -916,18 +995,20 @@ type usageRow struct {
 	fiveHour float64
 	sevenDay float64
 	tokens   int
+	models   map[string]float64 // model name → percentage of token delta
 }
 
 // aggregateUsageRows groups data points into display rows based on view mode.
 func (m model) aggregateUsageRows(points []claude.UsageDataPoint) []usageRow {
 	type bucket struct {
-		key      string
-		label    string
-		peak5h   float64
-		last7d   float64
-		maxToken int
-		minToken int
-		hasData  bool
+		key        string
+		label      string
+		peak5h     float64
+		last7d     float64
+		maxToken   int
+		minToken   int
+		lastModels map[string]int // most recent non-nil model snapshot
+		hasData    bool
 	}
 
 	bucketKey := func(t time.Time) (string, string) {
@@ -986,6 +1067,9 @@ func (m model) aggregateUsageRows(points []claude.UsageDataPoint) []usageRow {
 		if p.Tokens < bk.minToken {
 			bk.minToken = p.Tokens
 		}
+		if p.Models != nil {
+			bk.lastModels = p.Models
+		}
 		bk.hasData = true
 	}
 
@@ -997,11 +1081,28 @@ func (m model) aggregateUsageRows(points []claude.UsageDataPoint) []usageRow {
 		if tokens < 0 {
 			tokens = 0
 		}
+		var models map[string]float64
+		if len(bk.lastModels) > 0 {
+			var total int
+			for _, v := range bk.lastModels {
+				total += v
+			}
+			if total > 0 {
+				models = make(map[string]float64)
+				for m, v := range bk.lastModels {
+					pct := float64(v) / float64(total) * 100
+					if pct >= 1 {
+						models[m] = pct
+					}
+				}
+			}
+		}
 		rows = append(rows, usageRow{
 			label:    bk.label,
 			fiveHour: bk.peak5h,
 			sevenDay: bk.last7d,
 			tokens:   tokens,
+			models:   models,
 		})
 	}
 	return rows
@@ -1020,6 +1121,44 @@ func usageBar(pct float64, width int) string {
 		filled = width
 	}
 	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+}
+
+// shortModelName converts a full model ID to a short display name.
+// Examples: "claude-opus-4-6" → "opus", "claude-3-5-sonnet-20241022" → "sonnet"
+func shortModelName(model string) string {
+	name := strings.TrimPrefix(model, "claude-")
+	parts := strings.Split(name, "-")
+	var family []string
+	for _, p := range parts {
+		if len(p) > 0 && (p[0] < '0' || p[0] > '9') {
+			family = append(family, p)
+		}
+	}
+	if len(family) == 0 {
+		return name
+	}
+	return strings.Join(family, "-")
+}
+
+// formatModelPcts formats a model percentage map as a sorted string.
+// Models are sorted by descending percentage. E.g. "opus 73%  sonnet 27%"
+func formatModelPcts(models map[string]float64) string {
+	type mp struct {
+		name string
+		pct  float64
+	}
+	var sorted []mp
+	for m, p := range models {
+		sorted = append(sorted, mp{shortModelName(m), p})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].pct > sorted[j].pct
+	})
+	var parts []string
+	for _, m := range sorted {
+		parts = append(parts, fmt.Sprintf("%s %.0f%%", m.name, m.pct))
+	}
+	return strings.Join(parts, "  ")
 }
 
 // enterConfigScreen switches to the in-app config editor.
@@ -1425,6 +1564,14 @@ func (m model) updateRename(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		sessions, err := claude.ListAllSessions()
 		if err == nil {
 			m.sessions = sessions
+			// Restore cursor to the renamed session.
+			for i, item := range m.items() {
+				if !item.isHeader && !item.isWorktreeRow && item.session.SessionID == s.SessionID {
+					m.cursor = i
+					break
+				}
+			}
+			m.adjustScroll()
 		}
 		return m, statusCmd("renamed to \""+newTitle+"\"", false)
 	}
@@ -2283,6 +2430,11 @@ func formatUsage(s claude.SessionInfo) string {
 		}
 		parts = append(parts, apiPercent)
 	}
+	if cfg.StatusModel == "on" {
+		if lm := claude.GetLastModel(s.SessionID); lm != "" {
+			parts = append(parts, shortModelName(lm))
+		}
+	}
 	return strings.Join(parts, " · ")
 }
 
@@ -2430,6 +2582,11 @@ func main() {
 	}
 	m := initialModel(sessions, loadErr, insideTmux || tmux.InC9sSession())
 	m.demoMode = demoMode
+	// On startup, scan existing tmux windows and recover or clean up orphans
+	// from previous c9s runs (e.g. after keep_alive detach or a crash).
+	if !demoMode {
+		m.reconcileStartupWindows(sessions)
+	}
 	if demoMode {
 		m.showTokens = true    // show tokens in demo for nicer screenshots
 		m.showWorktrees = true // show worktrees in demo

@@ -23,6 +23,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Colors.StatusBg != "#1b1b2f" {
 		t.Errorf("default status bg = %q, want #1b1b2f", cfg.Colors.StatusBg)
 	}
+	if cfg.StatusModel != "on" {
+		t.Errorf("default status model = %q, want on", cfg.StatusModel)
+	}
 }
 
 func TestEffectiveColors(t *testing.T) {
@@ -79,54 +82,62 @@ func TestEditableFields(t *testing.T) {
 		t.Errorf("status_usage Options = %v, want 7 options", fields[4].Options)
 	}
 
-	// 6-8 are cost estimation fields (Cost estimation section).
+	// Sixth is status model (General section).
+	if fields[5].Key != "status_model" {
+		t.Errorf("field[5].Key = %q, want status_model", fields[5].Key)
+	}
+	if len(fields[5].Options) != 2 {
+		t.Errorf("status_model Options = %v, want 2 options", fields[5].Options)
+	}
+
+	// 7-9 are cost estimation fields (Cost estimation section).
 	for i, key := range []string{"cost_input", "cost_output", "cost_cache"} {
-		if fields[i+5].Key != key {
-			t.Errorf("field[%d].Key = %q, want %q", i+5, fields[i+5].Key, key)
+		if fields[i+6].Key != key {
+			t.Errorf("field[%d].Key = %q, want %q", i+6, fields[i+6].Key, key)
 		}
-		if fields[i+5].Section != "Cost estimation" {
-			t.Errorf("field[%d].Section = %q, want Cost estimation", i+5, fields[i+5].Section)
+		if fields[i+6].Section != "Cost estimation" {
+			t.Errorf("field[%d].Section = %q, want Cost estimation", i+6, fields[i+6].Section)
 		}
 	}
 
-	// 9-10 are usage history fields.
-	if fields[8].Key != "usage_history" {
-		t.Errorf("field[8].Key = %q, want usage_history", fields[8].Key)
+	// 10-11 are usage history fields.
+	if fields[9].Key != "usage_history" {
+		t.Errorf("field[9].Key = %q, want usage_history", fields[9].Key)
 	}
-	if fields[8].Section != "Usage history" {
-		t.Errorf("field[8].Section = %q, want Usage history", fields[8].Section)
+	if fields[9].Section != "Usage history" {
+		t.Errorf("field[9].Section = %q, want Usage history", fields[9].Section)
 	}
-	if fields[9].Key != "reset_history" {
-		t.Errorf("field[9].Key = %q, want reset_history", fields[9].Key)
+	if fields[10].Key != "reset_history" {
+		t.Errorf("field[10].Key = %q, want reset_history", fields[10].Key)
 	}
-	if !fields[9].Action {
+	if !fields[10].Action {
 		t.Error("reset_history should be an Action field")
 	}
 
-	// 11th and 12th are worktree fields (Worktrees section).
-	if fields[10].Key != "worktrees" {
-		t.Errorf("field[10].Key = %q, want worktrees", fields[10].Key)
+	// 12th and 13th are worktree fields (Worktrees section).
+	if fields[11].Key != "worktrees" {
+		t.Errorf("field[11].Key = %q, want worktrees", fields[11].Key)
 	}
-	if fields[10].Section != "Worktrees (beta)" {
-		t.Errorf("field[10].Section = %q, want Worktrees (beta)", fields[10].Section)
+	if fields[11].Section != "Worktrees (beta)" {
+		t.Errorf("field[11].Section = %q, want Worktrees (beta)", fields[11].Section)
 	}
-	if fields[11].Key != "worktree_expand" {
-		t.Errorf("field[11].Key = %q, want worktree_expand", fields[11].Key)
+	if fields[12].Key != "worktree_expand" {
+		t.Errorf("field[12].Key = %q, want worktree_expand", fields[12].Key)
 	}
 
 	// Next 3 should be shortcuts.
 	for i, key := range []string{"dashboard", "next_session", "prev_session"} {
-		if fields[i+12].Key != key {
-			t.Errorf("field[%d].Key = %q, want %q", i+12, fields[i+12].Key, key)
+		if fields[i+13].Key != key {
+			t.Errorf("field[%d].Key = %q, want %q", i+13, fields[i+13].Key, key)
 		}
-		if fields[i+12].Section != "Shortcuts" {
-			t.Errorf("field[%d].Section = %q, want Shortcuts", i+12, fields[i+12].Section)
+		if fields[i+13].Section != "Shortcuts" {
+			t.Errorf("field[%d].Section = %q, want Shortcuts", i+13, fields[i+13].Section)
 		}
 	}
 
-	// 16th should be theme toggle.
-	if fields[15].Key != "theme" {
-		t.Errorf("field[15].Key = %q, want theme", fields[15].Key)
+	// 17th should be theme toggle.
+	if fields[16].Key != "theme" {
+		t.Errorf("field[16].Key = %q, want theme", fields[16].Key)
 	}
 
 	// Test Get/Set roundtrip on refresh field.
