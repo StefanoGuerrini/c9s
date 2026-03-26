@@ -132,6 +132,10 @@ type model struct {
 	replacedSessions   map[string]bool          // sessions replaced by fork/clear, hidden from dashboard
 	lastRecordedFetch  time.Time                // dedup usage history writes
 
+	// Demo mode
+	demoSessionScreen bool   // showing fake session screen
+	demoSessionName   string // session name being "opened"
+
 	// Usage history screen
 	usageScreen   bool
 	usageViewMode int // 0=daily, 1=weekly, 2=monthly
@@ -349,6 +353,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusText = ""
 		return m, nil
 	case tea.KeyPressMsg:
+		if m.demoSessionScreen {
+			// Any key returns to dashboard.
+			m.demoSessionScreen = false
+			return m, nil
+		}
 		if m.usageScreen {
 			return m.updateUsage(msg)
 		}
@@ -509,6 +518,16 @@ func (m model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // openSession opens or switches to the selected session.
 func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
+	// Demo mode: show a fake session screen instead of opening a real tmux window.
+	if m.demoMode {
+		s := m.selectedSession(items)
+		if s == nil {
+			return m, nil
+		}
+		m.demoSessionScreen = true
+		m.demoSessionName = s.DisplayName()
+		return m, nil
+	}
 	if !m.insideTmux {
 		return m, statusCmd("tmux required — run c9s outside tmux to auto-bootstrap", true)
 	}
@@ -903,6 +922,36 @@ func (m model) updateUsage(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.usageDayRange = 30
 	}
 	return m, nil
+}
+
+// demoSessionView renders a fake Claude session screen for demo/recording.
+func (m model) demoSessionView() string {
+	accent := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(statusColors().Accent))
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColors().Dim))
+	fg := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColors().Fg))
+
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(accent.Render("  claude") + dim.Render(" — ") + fg.Render(m.demoSessionName))
+	b.WriteString("\n\n")
+	b.WriteString(dim.Render("  ╭──────────────────────────────────────────────────────╮"))
+	b.WriteString("\n")
+	b.WriteString(dim.Render("  │") + fg.Render("  Resuming session...                                  ") + dim.Render("│"))
+	b.WriteString("\n")
+	b.WriteString(dim.Render("  │") + fg.Render("                                                       ") + dim.Render("│"))
+	b.WriteString("\n")
+	b.WriteString(dim.Render("  │") + fg.Render("  > Refactoring auth middleware to use JWT tokens       ") + dim.Render("│"))
+	b.WriteString("\n")
+	b.WriteString(dim.Render("  │") + fg.Render("    instead of session cookies. Updating the token      ") + dim.Render("│"))
+	b.WriteString("\n")
+	b.WriteString(dim.Render("  │") + fg.Render("    validation logic and refreshing expired tokens...   ") + dim.Render("│"))
+	b.WriteString("\n")
+	b.WriteString(dim.Render("  │") + fg.Render("                                                       ") + dim.Render("│"))
+	b.WriteString("\n")
+	b.WriteString(dim.Render("  ╰──────────────────────────────────────────────────────╯"))
+	b.WriteString("\n\n")
+	b.WriteString(dim.Render("  press any key to return to dashboard"))
+	return b.String()
 }
 
 // usageView renders the usage history screen.
@@ -1656,6 +1705,9 @@ func altView(s string) tea.View {
 func (m model) View() tea.View {
 	if m.width == 0 {
 		return altView("Loading...")
+	}
+	if m.demoSessionScreen {
+		return altView(m.demoSessionView())
 	}
 	if m.usageScreen {
 		return altView(m.usageView())
@@ -2593,8 +2645,8 @@ func main() {
 		m.reconcileStartupWindows(sessions)
 	}
 	if demoMode {
-		m.showTokens = true    // show tokens in demo for nicer screenshots
-		m.showWorktrees = true // show worktrees in demo
+		m.showTokens = false    // start clean, toggle on during demo
+		m.showWorktrees = false // start clean, toggle on during demo
 		cfg.Worktrees = "always"
 		// Simulate managed windows with pane statuses for some sessions.
 		for _, s := range sessions {

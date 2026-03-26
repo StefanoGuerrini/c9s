@@ -10,10 +10,10 @@ Set Padding 16
 Set TypingSpeed 40ms
 Set Shell zsh
 
-# Start demo
+# Start demo — clean view, no tokens, no worktrees
 Type "./c9s --demo --inside-tmux"
 Enter
-Sleep 1.5s
+Sleep 2s
 
 # Navigate sessions
 Down
@@ -22,15 +22,28 @@ Down
 Sleep 300ms
 Down
 Sleep 300ms
-Down
-Sleep 300ms
 Up
 Sleep 300ms
 Up
 Sleep 300ms
 Up
-Sleep 300ms
 Sleep 500ms
+
+# Open a session (Enter)
+Enter
+Sleep 2.5s
+
+# Return to dashboard (any key)
+Escape
+Sleep 1s
+
+# Search for a session
+Type "/"
+Sleep 300ms
+Type "docker"
+Sleep 1s
+Escape
+Sleep 800ms
 
 # Preview panel
 Type "p"
@@ -39,16 +52,14 @@ Down
 Sleep 500ms
 Down
 Sleep 500ms
+Down
+Sleep 500ms
 Type "p"
 Sleep 800ms
 
-# Search
-Type "/"
-Sleep 300ms
-Type "websocket"
-Sleep 1s
-Escape
-Sleep 800ms
+# Toggle tokens on
+Type "t"
+Sleep 1.5s
 
 # Group by project
 Tab
@@ -62,27 +73,35 @@ Sleep 1.5s
 Tab
 Sleep 800ms
 
-# Toggle tokens off/on
+# Toggle tokens off
 Type "t"
-Sleep 1s
-Type "t"
-Sleep 800ms
+Sleep 500ms
 
-# Worktree rows
+# Toggle worktree rows on
 Type "w"
 Sleep 1.5s
+Down
+Sleep 300ms
+Down
+Sleep 300ms
+Down
+Sleep 300ms
+Down
+Sleep 300ms
+
+# Toggle worktrees off
 Type "w"
 Sleep 800ms
 
-# Usage history
+# Usage history — daily
 Type "u"
 Sleep 2s
 
-# Switch to weekly view
+# Weekly
 Type "w"
 Sleep 1.5s
 
-# Switch to monthly view
+# Monthly
 Type "m"
 Sleep 1.5s
 
@@ -99,8 +118,18 @@ Down
 Sleep 200ms
 Down
 Sleep 200ms
+Down
+Sleep 200ms
 Escape
 Sleep 800ms
+
+# Rename a session
+Type "R"
+Sleep 500ms
+Type "My important task"
+Sleep 800ms
+Escape
+Sleep 1s
 
 # Quit
 Type "q"
