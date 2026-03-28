@@ -12,6 +12,10 @@ import (
 )
 
 func TestReconcileWindows_NewSession(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+	tmpDir := t.TempDir()
+
 	// New session tracked with tmpKey should be reconciled to real sessionID.
 	m := &model{
 		replacedSessions: make(map[string]bool),
@@ -29,6 +33,7 @@ func TestReconcileWindows_NewSession(t *testing.T) {
 		{
 			SessionID:   "abc-def-123",
 			ProjectPath: "/home/user/project",
+			Dir:         tmpDir,
 			FileMtime:   time.Now(),
 		},
 	}
@@ -51,6 +56,10 @@ func TestReconcileWindows_NewSession(t *testing.T) {
 }
 
 func TestReconcileWindows_Fork(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+	tmpDir := t.TempDir()
+
 	// After fork: old session JSONL is stale, new forked session is active.
 	m := &model{
 		replacedSessions: make(map[string]bool),
@@ -68,11 +77,13 @@ func TestReconcileWindows_Fork(t *testing.T) {
 		{
 			SessionID:   "old-session-id",
 			ProjectPath: "/home/user/project",
+			Dir:         tmpDir,
 			FileMtime:   time.Now().Add(-5 * time.Minute), // stale
 		},
 		{
 			SessionID:   "forked-session-id",
 			ProjectPath: "/home/user/project",
+			Dir:         tmpDir,
 			FileMtime:   time.Now(), // recently active
 		},
 	}
@@ -95,6 +106,9 @@ func TestReconcileWindows_Fork(t *testing.T) {
 }
 
 func TestReconcileWindows_ActiveSessionSkipped(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+
 	// If current sessionID is valid and recently active, don't reconcile.
 	m := &model{
 		replacedSessions: make(map[string]bool),
@@ -129,6 +143,10 @@ func TestReconcileWindows_ActiveSessionSkipped(t *testing.T) {
 }
 
 func TestReconcileWindows_PicksMostRecent(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+	tmpDir := t.TempDir()
+
 	// Multiple active sessions in same project — should pick the most recent.
 	m := &model{
 		replacedSessions: make(map[string]bool),
@@ -146,16 +164,19 @@ func TestReconcileWindows_PicksMostRecent(t *testing.T) {
 		{
 			SessionID:   "old-id",
 			ProjectPath: "/home/user/project",
+			Dir:         tmpDir,
 			FileMtime:   now.Add(-5 * time.Minute), // stale
 		},
 		{
 			SessionID:   "session-a",
 			ProjectPath: "/home/user/project",
+			Dir:         tmpDir,
 			FileMtime:   now.Add(-10 * time.Second),
 		},
 		{
 			SessionID:   "session-b",
 			ProjectPath: "/home/user/project",
+			Dir:         tmpDir,
 			FileMtime:   now.Add(-2 * time.Second), // most recent
 		},
 	}
@@ -171,6 +192,9 @@ func TestReconcileWindows_PicksMostRecent(t *testing.T) {
 }
 
 func TestReconcileWindows_NoNewSession(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+
 	// If no recent session in the project, entry should remain unchanged.
 	m := &model{
 		replacedSessions: make(map[string]bool),
@@ -388,6 +412,9 @@ func TestStartProjectPickerOrdering(t *testing.T) {
 }
 
 func TestStartProjectPickerNoWorkDir(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+
 	oldWorkDir := cfg.WorkDir
 	cfg.WorkDir = ""
 	defer func() { cfg.WorkDir = oldWorkDir }()

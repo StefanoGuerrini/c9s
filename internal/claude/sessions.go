@@ -15,6 +15,9 @@ import (
 	"time"
 )
 
+// DebugLog is set by main when --debug is enabled. No-op by default.
+var DebugLog = func(string, ...any) {}
+
 // validSessionID matches UUID-like session IDs (hex + dashes only).
 var validSessionID = regexp.MustCompile(`^[a-fA-F0-9-]+$`)
 

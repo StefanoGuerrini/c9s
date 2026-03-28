@@ -13,6 +13,10 @@ const (
 	DashboardWindow = "dashboard"
 )
 
+// DryRun disables all tmux command execution. Used in tests to prevent
+// side effects against a real tmux session.
+var DryRun bool
+
 // Available returns true if tmux is installed.
 func Available() bool {
 	_, err := exec.LookPath("tmux")
@@ -84,6 +88,9 @@ func Attach() error {
 // name and command. When the command exits, the window auto-returns to
 // the dashboard. Returns the window ID.
 func NewWindow(name, shellCmd, workDir string) (string, error) {
+	if DryRun {
+		return "@dry", nil
+	}
 	// Wrap command: run claude, then switch back to dashboard when it exits.
 	wrapped := fmt.Sprintf(
 		`echo "Press Ctrl+b then b to return to dashboard"; %s; tmux select-window -t %s:%s 2>/dev/null`,
@@ -109,11 +116,17 @@ func NewWindow(name, shellCmd, workDir string) (string, error) {
 // SetWindowEnv sets a per-window tmux user option (accessible in format strings as #{@key}).
 // Uses set-window-option so each window has its own value (set-option would set session-level).
 func SetWindowEnv(windowID, key, value string) {
+	if DryRun {
+		return
+	}
 	exec.Command("tmux", "set-window-option", "-t", windowID, "@"+key, value).Run()
 }
 
 // SelectWindow switches to the given window in the c9s session.
 func SelectWindow(windowID string) error {
+	if DryRun {
+		return nil
+	}
 	return exec.Command("tmux", "select-window", "-t", windowID).Run()
 }
 
@@ -126,11 +139,17 @@ func SelectDashboard() error {
 
 // KillWindow kills the given window.
 func KillWindow(windowID string) error {
+	if DryRun {
+		return nil
+	}
 	return exec.Command("tmux", "kill-window", "-t", windowID).Run()
 }
 
 // RenameWindow renames the given tmux window.
 func RenameWindow(windowID, name string) error {
+	if DryRun {
+		return nil
+	}
 	return exec.Command("tmux", "rename-window", "-t", windowID, name).Run()
 }
 

@@ -24,6 +24,24 @@ var version = "dev"
 // cfg is the global config loaded at startup.
 var cfg config.Config
 
+// debugLog writes to /tmp/c9s-debug.log when --debug is enabled.
+var debugLog = func(string, ...any) {}
+
+func initDebugLog(enabled bool) {
+	if !enabled {
+		return
+	}
+	f, err := os.OpenFile("/tmp/c9s-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	log := func(format string, args ...any) {
+		fmt.Fprintf(f, "%s "+format+"\n", append([]any{time.Now().Format("15:04:05.000")}, args...)...)
+	}
+	debugLog = log
+	claude.DebugLog = log
+}
+
 var (
 	titleStyle    lipgloss.Style
 	headerStyle   lipgloss.Style
@@ -269,8 +287,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if !m.replacedSessions[id] {
 					m.replacedSessions[id] = true
 					if mw, ok := m.managedWindows[id]; ok {
+						debugLog("tick → killing superseded window %s session=%q", mw.windowID, id)
 						tmux.KillWindow(mw.windowID)
 						delete(m.managedWindows, id)
+					} else {
+						debugLog("tick → hiding superseded session %q (no window)", id)
 					}
 				}
 			}
@@ -301,6 +322,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update pane statuses for managed windows.
 		for key, mw := range m.managedWindows {
 			if !tmux.WindowExists(mw.windowID) {
+				debugLog("tick → window %s gone, removing session=%q", mw.windowID, key)
 				delete(m.managedWindows, key)
 				continue
 			}
@@ -364,6 +386,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusText = ""
 		return m, nil
 	case tea.KeyPressMsg:
+		debugLog("key=%q", msg.String())
 		if m.demoSessionScreen {
 			// Any key returns to dashboard.
 			m.demoSessionScreen = false
@@ -532,6 +555,7 @@ func (m model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // openSession opens or switches to the selected session.
 func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
+	debugLog("openSession cursor=%d", m.cursor)
 	// Demo mode: show a fake session screen instead of opening a real tmux window.
 	if m.demoMode {
 		s := m.selectedSession(items)
@@ -558,13 +582,53 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	debugLog("openSession session=%q status=%s project=%q", s.SessionID, s.Status, s.ProjectPath)
+
 	// If we already have a window for this session, try to switch to it.
 	if mw, ok := m.managedWindows[s.SessionID]; ok {
 		if err := tmux.SelectWindow(mw.windowID); err == nil {
+			debugLog("openSession → switched to existing window %s", mw.windowID)
 			return m, nil
 		}
 		// Window was closed externally — clean up and fall through to re-open.
+		debugLog("openSession → window %s gone, cleaning up", mw.windowID)
 		delete(m.managedWindows, s.SessionID)
+	}
+
+	// Check for superseded/forked sessions to prevent duplicate windows.
+	superseded := claude.GetSupersededSessions()
+
+	// Case 1: This session was superseded — switch to the successor's window.
+	if superseded[s.SessionID] {
+		debugLog("openSession → session is superseded, looking for successor window")
+		for _, mw := range m.managedWindows {
+			if mw.project == s.ProjectPath {
+				if err := tmux.SelectWindow(mw.windowID); err == nil {
+					debugLog("openSession → redirected to successor window %s", mw.windowID)
+					return m, nil
+				}
+			}
+		}
+	}
+
+	// Case 2: This is the successor session, but reconcileWindows hasn't
+	// re-keyed yet. If a managed window still tracks a superseded session
+	// in the same project, switch to it and re-key now.
+	for oldID, mw := range m.managedWindows {
+		if mw.project == s.ProjectPath && superseded[oldID] {
+			if err := tmux.SelectWindow(mw.windowID); err == nil {
+				debugLog("openSession → re-keyed window %s from %q to %q", mw.windowID, oldID, s.SessionID)
+				// Re-key the managed window to the new session ID.
+				delete(m.managedWindows, oldID)
+				m.managedWindows[s.SessionID] = managedWindow{
+					windowID:  mw.windowID,
+					sessionID: s.SessionID,
+					project:   mw.project,
+				}
+				tmux.SetWindowEnv(mw.windowID, "session-id", s.SessionID)
+				return m, nil
+			}
+		}
 	}
 
 	// Build the claude command.
@@ -603,10 +667,12 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 	}
 
 	name := truncWindowName(s.DisplayName())
+	debugLog("openSession → creating window name=%q cmd=%q dir=%q", name, claudeCmd, workDir)
 	windowID, err := tmux.NewWindow(name, claudeCmd, workDir)
 	if err != nil {
 		return m, statusCmd(fmt.Sprintf("failed to open window: %v", err), true)
 	}
+	debugLog("openSession → created window %s", windowID)
 
 	// Tag the window with the session ID so we can recover it after restart.
 	tmux.SetWindowEnv(windowID, "session-id", s.SessionID)
@@ -621,6 +687,8 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 
 // newSession creates a brand new claude session in the selected project.
 func (m model) newSession(items []displayItem, effort, modelID string) (tea.Model, tea.Cmd) {
+	debugLog("newSession effort=%q model=%q effortWorkDir=%q pickingProject=%v pickingEffort=%v",
+		effort, modelID, m.effortWorkDir, m.pickingProject, m.pickingEffort)
 	if !m.insideTmux {
 		return m, statusCmd("tmux required — run c9s outside tmux to auto-bootstrap", true)
 	}
@@ -650,6 +718,7 @@ func (m model) newSession(items []displayItem, effort, modelID string) (tea.Mode
 
 	// Name the window with project + short timestamp to distinguish multiple sessions.
 	name := fmt.Sprintf("%s·%s", filepath.Base(workDir), time.Now().Format("15:04"))
+	debugLog("newSession → creating window name=%q cmd=%q dir=%q", name, cmd, workDir)
 	windowID, err := tmux.NewWindow(name, cmd, workDir)
 	if err != nil {
 		return m, statusCmd(fmt.Sprintf("failed to create session: %v", err), true)
@@ -1147,6 +1216,7 @@ func (m *model) reconcileWindows(sessions []claude.SessionInfo) {
 		}
 
 		// Re-key: remove old entry, add under new sessionID.
+		debugLog("reconcile → re-key window %s: %q → %q (project=%q)", mw.windowID, key, bestID, mw.project)
 		toDelete = append(toDelete, key)
 		toAdd[bestID] = managedWindow{
 			windowID:   mw.windowID,
@@ -1168,6 +1238,7 @@ func (m *model) reconcileWindows(sessions []claude.SessionInfo) {
 			newHasContent = newSession.Summary != "" || newSession.FirstPrompt != ""
 		}
 		isFork := oldOnDisk && newHasContent
+		debugLog("reconcile → type: fork=%v (oldOnDisk=%v newHasContent=%v)", isFork, oldOnDisk, newHasContent)
 
 		if mw.sessionID != "" && !strings.HasPrefix(key, "new-") {
 			if isFork {
@@ -1231,12 +1302,15 @@ func (m *model) reconcileStartupWindows(sessions []claude.SessionInfo) {
 		// Re-populate managedWindows for tagged windows whose session is still known.
 		if s, ok := sessionByID[w.SessionID]; ok {
 			if _, alreadyTracked := m.managedWindows[w.SessionID]; !alreadyTracked {
+				debugLog("startup → recovered window %s name=%q session=%q project=%q", w.ID, w.Name, w.SessionID, s.ProjectPath)
 				m.managedWindows[w.SessionID] = managedWindow{
 					windowID:  w.ID,
 					sessionID: w.SessionID,
 					project:   s.ProjectPath,
 				}
 			}
+		} else {
+			debugLog("startup → orphan window %s name=%q session=%q (not in session list)", w.ID, w.Name, w.SessionID)
 		}
 		// Windows for unknown/superseded sessions are left alone here.
 		// The first tick will detect them via GetSupersededSessions and close them.
@@ -1992,6 +2066,7 @@ func (m model) closeWindow(items []displayItem) (tea.Model, tea.Cmd) {
 		return m, statusCmd("no managed window for this session", true)
 	}
 
+	debugLog("closeWindow session=%q window=%s", s.SessionID, mw.windowID)
 	tmux.KillWindow(mw.windowID)
 	delete(m.managedWindows, s.SessionID)
 	return m, statusCmd("window closed", false)
@@ -3025,6 +3100,7 @@ func main() {
 
 	insideTmux := false
 	demoMode := false
+	debugMode := false
 	args := os.Args[1:]
 
 	// Parse flags from args (remove internal flags, keep user-facing ones for forwarding).
@@ -3036,11 +3112,16 @@ func main() {
 		case "--demo":
 			demoMode = true
 			filtered = append(filtered, arg) // forward through tmux bootstrap
+		case "--debug":
+			debugMode = true
+			filtered = append(filtered, arg) // forward through tmux bootstrap
 		default:
 			filtered = append(filtered, arg)
 		}
 	}
 	args = filtered
+
+	initDebugLog(debugMode)
 
 	// If tmux is available and we're not already inside tmux, bootstrap.
 	if !insideTmux && tmux.Available() && !tmux.InSession() {

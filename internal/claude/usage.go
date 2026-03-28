@@ -74,12 +74,14 @@ func FetchUsage() (*UsageResult, error) {
 		return &UsageResult{Usage: cached, Stale: false, Fetched: fetched}, nil
 	}
 	if tooSoon {
+		DebugLog("usage → backing off (nextTry in %s, failures=%d)", time.Until(usageCache.nextTry).Round(time.Second), usageCache.failures)
 		if cached != nil {
 			return &UsageResult{Usage: cached, Stale: true, Fetched: fetched}, nil
 		}
 		return nil, fmt.Errorf("usage API: backing off after repeated failures")
 	}
 
+	DebugLog("usage → fetching from API")
 	usage, err := fetchUsageOnce()
 	if err != nil {
 		usageCache.mu.Lock()
@@ -89,8 +91,10 @@ func FetchUsage() (*UsageResult, error) {
 		var backoff time.Duration
 		if rle, ok := err.(*rateLimitError); ok && rle.retryAfter > 0 {
 			backoff = rle.retryAfter
+			DebugLog("usage → 429 rate limited, retry after %s (failures=%d)", backoff, usageCache.failures)
 		} else {
 			backoff = usageCacheTTL * time.Duration(1<<min(usageCache.failures, 6))
+			DebugLog("usage → error: %v, backoff=%s (failures=%d)", err, backoff, usageCache.failures)
 		}
 		if backoff > usageMaxBackoff {
 			backoff = usageMaxBackoff
@@ -118,6 +122,7 @@ func FetchUsage() (*UsageResult, error) {
 	}
 	usageCache.mu.Unlock()
 
+	DebugLog("usage → fetched OK (failures=%d)", usageCache.failures)
 	return &UsageResult{Usage: usage, Stale: false, Fetched: now}, nil
 }
 
