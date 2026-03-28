@@ -31,7 +31,10 @@ func initDebugLog(enabled bool) {
 	if !enabled {
 		return
 	}
-	f, err := os.OpenFile("/tmp/c9s-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	logDir := filepath.Join(os.Getenv("HOME"), ".c9s")
+	os.MkdirAll(logDir, 0700)
+	logPath := filepath.Join(logDir, "debug.log")
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return
 	}

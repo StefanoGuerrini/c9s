@@ -160,6 +160,24 @@ func TestParseTmuxVersionSupportsSync(t *testing.T) {
 	}
 }
 
+func TestShellQuoteJoin(t *testing.T) {
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"/usr/bin/c9s"}, "'/usr/bin/c9s'"},
+		{[]string{"/path with spaces/c9s", "--inside-tmux"}, "'/path with spaces/c9s' '--inside-tmux'"},
+		{[]string{"it's", "a test"}, `'it'"'"'s' 'a test'`},
+		{[]string{"/usr/bin/c9s", "--debug", "--demo"}, "'/usr/bin/c9s' '--debug' '--demo'"},
+	}
+	for _, tt := range tests {
+		got := shellQuoteJoin(tt.args)
+		if got != tt.want {
+			t.Errorf("shellQuoteJoin(%v) = %q, want %q", tt.args, got, tt.want)
+		}
+	}
+}
+
 func TestIsBoxLine(t *testing.T) {
 	tests := []struct {
 		input string

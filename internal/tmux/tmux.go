@@ -50,8 +50,9 @@ func SessionExists() bool {
 // current process (exec) on success.
 func Bootstrap(selfBin string, args []string, keys NavKeys, colors StatusColors, version string, scrollSpeed, refreshSeconds int) error {
 	// Create new tmux session with dashboard window running c9s --inside-tmux.
+	// Shell-quote each argument to handle paths with spaces or metacharacters.
 	cmdArgs := append([]string{selfBin, "--inside-tmux"}, args...)
-	cmd := strings.Join(cmdArgs, " ")
+	cmd := shellQuoteJoin(cmdArgs)
 
 	err := exec.Command("tmux", "new-session", "-d",
 		"-s", SessionName,
@@ -73,7 +74,7 @@ func Bootstrap(selfBin string, args []string, keys NavKeys, colors StatusColors,
 // tmux session. Used when re-attaching after keep_alive detach.
 func CreateDashboardWindow(selfBin string, args []string) error {
 	cmdArgs := append([]string{selfBin, "--inside-tmux"}, args...)
-	cmd := strings.Join(cmdArgs, " ")
+	cmd := shellQuoteJoin(cmdArgs)
 	return exec.Command("tmux", "new-window", "-t", SessionName, "-n", DashboardWindow, cmd).Run()
 }
 
@@ -151,6 +152,17 @@ func RenameWindow(windowID, name string) error {
 		return nil
 	}
 	return exec.Command("tmux", "rename-window", "-t", windowID, name).Run()
+}
+
+// shellQuoteJoin quotes each argument for safe shell interpolation and joins them.
+// Handles paths with spaces, quotes, and other shell metacharacters.
+func shellQuoteJoin(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		// Single-quote the arg, escaping any embedded single quotes.
+		quoted[i] = "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
+	}
+	return strings.Join(quoted, " ")
 }
 
 // ListWindows returns window names, IDs, and tagged session IDs in the c9s session.

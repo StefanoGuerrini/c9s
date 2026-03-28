@@ -47,8 +47,9 @@ var usageCache struct {
 }
 
 const (
-	usageCacheTTL   = 5 * time.Minute
-	usageMaxBackoff = 4 * time.Hour
+	usageCacheTTL    = 5 * time.Minute
+	usageMaxBackoff  = 4 * time.Hour
+	usageAuthBackoff = 10 * time.Minute // shorter backoff for auth errors — token may be refreshed by Claude Code
 )
 
 // UsageResult wraps usage data with metadata about freshness.
@@ -88,10 +89,18 @@ func FetchUsage() (*UsageResult, error) {
 		usageCache.failures++
 
 		// Use Retry-After from server if available, otherwise exponential backoff.
+		// Auth errors use a shorter max backoff since the token may be refreshed
+		// at any time by Claude Code.
 		var backoff time.Duration
 		if rle, ok := err.(*rateLimitError); ok && rle.retryAfter > 0 {
 			backoff = rle.retryAfter
 			DebugLog("usage → 429 rate limited, retry after %s (failures=%d)", backoff, usageCache.failures)
+		} else if isAuthError(err) {
+			backoff = usageCacheTTL * time.Duration(1<<min(usageCache.failures, 3))
+			if backoff > usageAuthBackoff {
+				backoff = usageAuthBackoff
+			}
+			DebugLog("usage → auth error: %v, backoff=%s (failures=%d)", err, backoff, usageCache.failures)
 		} else {
 			backoff = usageCacheTTL * time.Duration(1<<min(usageCache.failures, 6))
 			DebugLog("usage → error: %v, backoff=%s (failures=%d)", err, backoff, usageCache.failures)
@@ -128,15 +137,55 @@ func FetchUsage() (*UsageResult, error) {
 
 // fetchUsageOnce makes a single API call to get usage data.
 // On 429, returns a rateLimitError with the Retry-After duration.
+// On 401/403, clears the cached token and re-reads from Keychain/file
+// (Claude Code may have already refreshed it) and retries once.
 func fetchUsageOnce() (*Usage, error) {
 	token, err := getOAuthToken()
 	if err != nil {
 		return nil, fmt.Errorf("no OAuth token: %w", err)
 	}
 
+	usage, statusCode, err := doUsageRequest(token)
+	if err == nil {
+		return usage, nil
+	}
+
+	// On auth failure, clear cached token and re-read from source.
+	// Claude Code refreshes its own token when used, so re-reading
+	// picks up the new token without us performing the OAuth refresh.
+	if statusCode == 401 || statusCode == 403 {
+		DebugLog("usage → %d, clearing cached token and re-reading", statusCode)
+		clearCachedToken()
+		newToken, readErr := readOAuthToken()
+		if readErr != nil {
+			DebugLog("usage → re-read token failed: %v", readErr)
+			return nil, err // return original error
+		}
+		if newToken == token {
+			DebugLog("usage → re-read token unchanged (still expired)")
+			return nil, err
+		}
+		// Got a different (hopefully refreshed) token — cache and retry.
+		DebugLog("usage → got new token, retrying")
+		usageCache.mu.Lock()
+		usageCache.token = newToken
+		usageCache.mu.Unlock()
+		usage, _, retryErr := doUsageRequest(newToken)
+		if retryErr != nil {
+			return nil, retryErr
+		}
+		return usage, nil
+	}
+
+	return nil, err
+}
+
+// doUsageRequest makes a single HTTP request to the usage API.
+// Returns the usage data, HTTP status code, and any error.
+func doUsageRequest(token string) (*Usage, int, error) {
 	req, err := http.NewRequest("GET", "https://api.anthropic.com/api/oauth/usage", nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
@@ -144,25 +193,25 @@ func fetchUsageOnce() (*Usage, error) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 429 {
 		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
-		return nil, &rateLimitError{retryAfter: retryAfter}
+		return nil, 429, &rateLimitError{retryAfter: retryAfter}
 	}
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("usage API: %d %s", resp.StatusCode, string(body))
+		return nil, resp.StatusCode, fmt.Errorf("usage API: %d %s", resp.StatusCode, string(body))
 	}
 
 	var usage Usage
 	if err := json.NewDecoder(resp.Body).Decode(&usage); err != nil {
-		return nil, err
+		return nil, 200, err
 	}
-	return &usage, nil
+	return &usage, 200, nil
 }
 
 // rateLimitError is returned on 429 responses, carrying the server's requested wait time.
@@ -172,6 +221,12 @@ type rateLimitError struct {
 
 func (e *rateLimitError) Error() string {
 	return fmt.Sprintf("usage API: 429 rate limited (retry after %s)", e.retryAfter)
+}
+
+// isAuthError checks if an error is an authentication/authorization failure.
+func isAuthError(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "usage API: 401") || strings.Contains(s, "usage API: 403")
 }
 
 // parseRetryAfter parses the Retry-After header value (seconds).
@@ -187,14 +242,20 @@ func parseRetryAfter(val string) time.Duration {
 
 // oauthCreds is the JSON structure stored in the credentials file and keychain.
 type oauthCreds struct {
-	ClaudeAiOauth struct {
-		AccessToken string `json:"accessToken"`
-	} `json:"claudeAiOauth"`
+	ClaudeAiOauth oauthFields `json:"claudeAiOauth"`
+}
+
+type oauthFields struct {
+	AccessToken      string   `json:"accessToken"`
+	RefreshToken     string   `json:"refreshToken,omitempty"`
+	ExpiresAt        int64    `json:"expiresAt,omitempty"`
+	Scopes           []string `json:"scopes,omitempty"`
+	SubscriptionType string   `json:"subscriptionType,omitempty"`
+	RateLimitTier    string   `json:"rateLimitTier,omitempty"`
 }
 
 // getOAuthToken reads Claude Code's OAuth access token.
-// On macOS: tries Keychain first, falls back to credentials file.
-// On Linux/Windows: reads from ~/.claude/.credentials.json (or $CLAUDE_CONFIG_DIR).
+// Returns cached token if available and not expired, otherwise reads fresh from source.
 func getOAuthToken() (string, error) {
 	usageCache.mu.Lock()
 	if usageCache.token != "" {
@@ -204,20 +265,7 @@ func getOAuthToken() (string, error) {
 	}
 	usageCache.mu.Unlock()
 
-	var token string
-	var err error
-
-	if runtime.GOOS == "darwin" {
-		// macOS: try Keychain first, fall back to credentials file.
-		token, err = readKeychainToken()
-		if err != nil {
-			token, err = readCredentialsFile()
-		}
-	} else {
-		// Linux/Windows: credentials file only.
-		token, err = readCredentialsFile()
-	}
-
+	token, err := readOAuthToken()
 	if err != nil {
 		return "", err
 	}
@@ -229,35 +277,78 @@ func getOAuthToken() (string, error) {
 	return token, nil
 }
 
-// readKeychainToken reads the OAuth token from macOS Keychain.
-func readKeychainToken() (string, error) {
-	out, err := exec.Command("security", "find-generic-password",
-		"-s", "Claude Code-credentials", "-w").Output()
-	if err != nil {
-		return "", fmt.Errorf("keychain read failed: %w", err)
-	}
-	return parseOAuthToken(out)
+// clearCachedToken resets the cached token so the next call re-reads from source.
+func clearCachedToken() {
+	usageCache.mu.Lock()
+	usageCache.token = ""
+	usageCache.mu.Unlock()
 }
 
-// readCredentialsFile reads the OAuth token from ~/.claude/.credentials.json.
-func readCredentialsFile() (string, error) {
-	path := filepath.Join(claudeDir(), ".credentials.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("credentials file: %w", err)
-	}
-	return parseOAuthToken(data)
-}
+// readOAuthToken reads the OAuth credentials from the platform-appropriate source.
+// On macOS: tries Keychain first, falls back to credentials file.
+// On Linux/Windows: reads from ~/.claude/.credentials.json (or $CLAUDE_CONFIG_DIR).
+// If the token is expired, clears the cached token so the next API call triggers re-read.
+func readOAuthToken() (string, error) {
+	var creds *oauthCreds
+	var err error
 
-// parseOAuthToken extracts the access token from credentials JSON.
-func parseOAuthToken(data []byte) (string, error) {
-	var creds oauthCreds
-	if err := json.Unmarshal(data, &creds); err != nil {
-		return "", fmt.Errorf("parse credentials: %w", err)
+	if runtime.GOOS == "darwin" {
+		creds, err = readKeychainCreds()
+		if err != nil {
+			creds, err = readCredentialsCreds()
+		}
+	} else {
+		creds, err = readCredentialsCreds()
 	}
+
+	if err != nil {
+		return "", err
+	}
+
 	token := strings.TrimSpace(creds.ClaudeAiOauth.AccessToken)
 	if token == "" {
 		return "", fmt.Errorf("empty OAuth token")
 	}
+
+	// Check expiry proactively (expiresAt is milliseconds since epoch).
+	if creds.ClaudeAiOauth.ExpiresAt > 0 {
+		expiresAt := time.UnixMilli(creds.ClaudeAiOauth.ExpiresAt)
+		if time.Now().After(expiresAt) {
+			DebugLog("usage → token expired at %s", expiresAt.Format("15:04:05"))
+		}
+	}
+
 	return token, nil
+}
+
+// readKeychainCreds reads the OAuth credentials from macOS Keychain.
+func readKeychainCreds() (*oauthCreds, error) {
+	out, err := exec.Command("security", "find-generic-password",
+		"-s", "Claude Code-credentials", "-w").Output()
+	if err != nil {
+		return nil, fmt.Errorf("keychain read failed: %w", err)
+	}
+	return parseOAuthCreds(out)
+}
+
+// readCredentialsCreds reads the OAuth credentials from ~/.claude/.credentials.json.
+func readCredentialsCreds() (*oauthCreds, error) {
+	path := filepath.Join(claudeDir(), ".credentials.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("credentials file: %w", err)
+	}
+	return parseOAuthCreds(data)
+}
+
+// parseOAuthCreds parses the full OAuth credentials from JSON data.
+func parseOAuthCreds(data []byte) (*oauthCreds, error) {
+	var creds oauthCreds
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return nil, fmt.Errorf("parse credentials: %w", err)
+	}
+	if strings.TrimSpace(creds.ClaudeAiOauth.AccessToken) == "" {
+		return nil, fmt.Errorf("empty OAuth token")
+	}
+	return &creds, nil
 }

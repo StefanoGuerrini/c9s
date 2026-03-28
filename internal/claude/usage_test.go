@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -182,6 +183,84 @@ func TestRateLimitError(t *testing.T) {
 	err := &rateLimitError{retryAfter: 60 * time.Second}
 	if err.Error() == "" {
 		t.Error("rateLimitError.Error() should not be empty")
+	}
+}
+
+func TestIsAuthError(t *testing.T) {
+	tests := []struct {
+		err  string
+		want bool
+	}{
+		{"usage API: 401 {\"type\":\"error\"}", true},
+		{"usage API: 403 {\"type\":\"error\"}", true},
+		{"usage API: 429 rate limited", false},
+		{"connection refused", false},
+	}
+	for _, tt := range tests {
+		if got := isAuthError(fmt.Errorf("%s", tt.err)); got != tt.want {
+			t.Errorf("isAuthError(%q) = %v, want %v", tt.err, got, tt.want)
+		}
+	}
+}
+
+func TestAuthErrorBackoff(t *testing.T) {
+	// Auth errors should cap at usageAuthBackoff (10 min), not usageMaxBackoff (4h).
+	tests := []struct {
+		failures int
+		want     time.Duration
+	}{
+		{1, 10 * time.Minute},  // 5min * 2^1 = 10min, = cap
+		{2, 10 * time.Minute},  // 5min * 2^2 = 20min, capped at 10min
+		{5, 10 * time.Minute},  // capped at 10min
+	}
+	for _, tt := range tests {
+		backoff := usageCacheTTL * time.Duration(1<<min(tt.failures, 3))
+		if backoff > usageAuthBackoff {
+			backoff = usageAuthBackoff
+		}
+		if backoff != tt.want {
+			t.Errorf("auth failures=%d: backoff=%v, want %v", tt.failures, backoff, tt.want)
+		}
+	}
+}
+
+func TestClearCachedToken(t *testing.T) {
+	usageCache.mu.Lock()
+	usageCache.token = "old-token"
+	usageCache.mu.Unlock()
+
+	clearCachedToken()
+
+	usageCache.mu.Lock()
+	got := usageCache.token
+	usageCache.mu.Unlock()
+	if got != "" {
+		t.Errorf("clearCachedToken: token = %q, want empty", got)
+	}
+}
+
+func TestParseOAuthCreds(t *testing.T) {
+	data := []byte(`{"claudeAiOauth":{"accessToken":"tok-123","refreshToken":"ref-456","expiresAt":1774718229097}}`)
+	creds, err := parseOAuthCreds(data)
+	if err != nil {
+		t.Fatalf("parseOAuthCreds() error: %v", err)
+	}
+	if creds.ClaudeAiOauth.AccessToken != "tok-123" {
+		t.Errorf("accessToken = %q, want %q", creds.ClaudeAiOauth.AccessToken, "tok-123")
+	}
+	if creds.ClaudeAiOauth.RefreshToken != "ref-456" {
+		t.Errorf("refreshToken = %q, want %q", creds.ClaudeAiOauth.RefreshToken, "ref-456")
+	}
+	if creds.ClaudeAiOauth.ExpiresAt != 1774718229097 {
+		t.Errorf("expiresAt = %d, want %d", creds.ClaudeAiOauth.ExpiresAt, 1774718229097)
+	}
+}
+
+func TestParseOAuthCreds_Empty(t *testing.T) {
+	data := []byte(`{"claudeAiOauth":{"accessToken":""}}`)
+	_, err := parseOAuthCreds(data)
+	if err == nil {
+		t.Error("parseOAuthCreds() should error on empty token")
 	}
 }
 
