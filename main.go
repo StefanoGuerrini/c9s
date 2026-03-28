@@ -1555,14 +1555,15 @@ type usageRow struct {
 // aggregateUsageRows groups data points into display rows based on view mode.
 func (m model) aggregateUsageRows(points []claude.UsageDataPoint) []usageRow {
 	type bucket struct {
-		key        string
-		label      string
-		peak5h     float64
-		last7d     float64
-		maxToken   int
-		minToken   int
-		lastModels map[string]int // most recent non-nil model snapshot
-		hasData    bool
+		key         string
+		label       string
+		peak5h      float64
+		last7d      float64
+		maxToken    int
+		minToken    int
+		firstModels map[string]int // earliest non-nil model snapshot in bucket
+		lastModels  map[string]int // most recent non-nil model snapshot in bucket
+		hasData     bool
 	}
 
 	bucketKey := func(t time.Time) (string, string) {
@@ -1622,6 +1623,9 @@ func (m model) aggregateUsageRows(points []claude.UsageDataPoint) []usageRow {
 			bk.minToken = p.Tokens
 		}
 		if p.Models != nil {
+			if bk.firstModels == nil {
+				bk.firstModels = p.Models
+			}
 			bk.lastModels = p.Models
 		}
 		bk.hasData = true
@@ -1635,15 +1639,26 @@ func (m model) aggregateUsageRows(points []claude.UsageDataPoint) []usageRow {
 		if tokens < 0 {
 			tokens = 0
 		}
+		// Compute model deltas: tokens added during this bucket period.
 		var models map[string]float64
 		if len(bk.lastModels) > 0 {
+			deltas := make(map[string]int)
+			for m, v := range bk.lastModels {
+				delta := v
+				if bk.firstModels != nil {
+					delta -= bk.firstModels[m]
+				}
+				if delta > 0 {
+					deltas[m] = delta
+				}
+			}
 			var total int
-			for _, v := range bk.lastModels {
+			for _, v := range deltas {
 				total += v
 			}
 			if total > 0 {
 				models = make(map[string]float64)
-				for m, v := range bk.lastModels {
+				for m, v := range deltas {
 					pct := float64(v) / float64(total) * 100
 					if pct >= 1 {
 						models[m] = pct

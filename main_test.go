@@ -290,6 +290,59 @@ func TestAggregateUsageRows_Weekly(t *testing.T) {
 	}
 }
 
+func TestAggregateUsageRows_ModelDeltas(t *testing.T) {
+	now := time.Now()
+	m := &model{usageViewMode: 0, usageDayRange: 7}
+
+	// Day 1: opus goes from 1000 → 1500 (+500), sonnet from 200 → 400 (+200)
+	// Day 2: opus goes from 1500 → 1600 (+100), sonnet stays at 400 (+0)
+	points := []claude.UsageDataPoint{
+		{
+			Time: now.Add(-1*24*time.Hour - time.Hour), FiveHour: 40, Tokens: 1200,
+			Models: map[string]int{"opus": 1000, "sonnet": 200},
+		},
+		{
+			Time: now.Add(-1 * 24 * time.Hour), FiveHour: 50, Tokens: 1900,
+			Models: map[string]int{"opus": 1500, "sonnet": 400},
+		},
+		{
+			Time: now, FiveHour: 30, Tokens: 2000,
+			Models: map[string]int{"opus": 1600, "sonnet": 400},
+		},
+	}
+
+	rows := m.aggregateUsageRows(points)
+	if len(rows) < 2 {
+		t.Fatalf("expected at least 2 rows, got %d", len(rows))
+	}
+
+	// rows[0] = today (most recent first): only opus increased by 100, sonnet unchanged
+	todayModels := rows[0].models
+	if todayModels != nil {
+		// sonnet had no delta, should not appear (or be 0%)
+		if pct, ok := todayModels["sonnet"]; ok && pct > 0 {
+			t.Errorf("today: sonnet should have 0 delta, got %.0f%%", pct)
+		}
+		if pct, ok := todayModels["opus"]; ok && pct < 99 {
+			t.Errorf("today: opus should be ~100%%, got %.0f%%", pct)
+		}
+	}
+
+	// rows[1] = yesterday: opus +500, sonnet +200 → opus ~71%, sonnet ~29%
+	yesterdayModels := rows[1].models
+	if yesterdayModels == nil {
+		t.Fatal("yesterday: expected model data")
+	}
+	opusPct := yesterdayModels["opus"]
+	sonnetPct := yesterdayModels["sonnet"]
+	if opusPct < 65 || opusPct > 77 {
+		t.Errorf("yesterday: opus = %.0f%%, want ~71%%", opusPct)
+	}
+	if sonnetPct < 23 || sonnetPct > 35 {
+		t.Errorf("yesterday: sonnet = %.0f%%, want ~29%%", sonnetPct)
+	}
+}
+
 func TestFmtResetTime(t *testing.T) {
 	tests := []struct {
 		name     string
