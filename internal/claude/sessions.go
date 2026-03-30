@@ -514,6 +514,9 @@ func GetSupersededSessions() map[string]bool {
 	return superseded
 }
 
+// ReadTokenUsageForTest exposes readTokenUsage for use in external test packages.
+func ReadTokenUsageForTest(s *SessionInfo) { readTokenUsage(s) }
+
 // GetLastModel returns the most recent model used in a session.
 func GetLastModel(sessionID string) string {
 	cache.mu.Lock()

@@ -1177,9 +1177,22 @@ func (m *model) reconcileWindows(sessions []claude.SessionInfo) {
 	toDelete := []string{}
 	toAdd := map[string]managedWindow{}
 
+	// Only confirmed-superseded sessions can cause a real-ID window to be re-keyed.
+	// This prevents concurrent sessions in the same project from stealing each other's windows.
+	superseded := claude.GetSupersededSessions()
+
 	for key, mw := range m.managedWindows {
 		project := mw.project
 		if project == "" {
+			continue
+		}
+
+		isNewKey := strings.HasPrefix(key, "new-")
+
+		// For real session IDs: only re-key if this session is confirmed superseded
+		// (i.e. another session has a forkedFrom pointing here). This prevents concurrent
+		// sessions in the same project from stealing each other's windows.
+		if !isNewKey && !superseded[mw.sessionID] {
 			continue
 		}
 

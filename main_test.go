@@ -60,7 +60,14 @@ func TestReconcileWindows_Fork(t *testing.T) {
 	t.Cleanup(func() { tmux.DryRun = false })
 	tmpDir := t.TempDir()
 
-	// After fork: old session JSONL is stale, new forked session is active.
+	// Write a JSONL for forked-session-id with forkedFrom pointing to old-session-id.
+	// This makes GetSupersededSessions() return old-session-id as superseded.
+	forkedJSONL := `{"forkedFrom":{"sessionId":"old-session-id"}}` + "\n"
+	os.WriteFile(filepath.Join(tmpDir, "forked-session-id.jsonl"), []byte(forkedJSONL), 0644)
+	// Also write a minimal JSONL for old-session-id so it's in cache.
+	os.WriteFile(filepath.Join(tmpDir, "old-session-id.jsonl"), []byte(""), 0644)
+
+	// After fork: old session superseded, new forked session is active.
 	m := &model{
 		replacedSessions: make(map[string]bool),
 		managedWindows: map[string]managedWindow{
@@ -86,6 +93,11 @@ func TestReconcileWindows_Fork(t *testing.T) {
 			Dir:         tmpDir,
 			FileMtime:   time.Now(), // recently active
 		},
+	}
+
+	// Populate token cache so GetSupersededSessions() works.
+	for i := range sessions {
+		claude.ReadTokenUsageForTest(&sessions[i])
 	}
 
 	m.reconcileWindows(sessions)
@@ -142,12 +154,67 @@ func TestReconcileWindows_ActiveSessionSkipped(t *testing.T) {
 	}
 }
 
-func TestReconcileWindows_PicksMostRecent(t *testing.T) {
+func TestReconcileWindows_ConcurrentSessionsNotStolen(t *testing.T) {
 	tmux.DryRun = true
 	t.Cleanup(func() { tmux.DryRun = false })
 	tmpDir := t.TempDir()
 
-	// Multiple active sessions in same project — should pick the most recent.
+	// Two concurrent sessions in the same project, each tracked by its own window.
+	// Neither should steal the other's window — they're independent.
+	m := &model{
+		replacedSessions: make(map[string]bool),
+		managedWindows: map[string]managedWindow{
+			"session-a": {
+				windowID:  "@1",
+				sessionID: "session-a",
+				project:   "/home/user/project",
+			},
+			"session-b": {
+				windowID:  "@2",
+				sessionID: "session-b",
+				project:   "/home/user/project",
+			},
+		},
+	}
+
+	now := time.Now()
+	sessions := []claude.SessionInfo{
+		{
+			SessionID:   "session-a",
+			ProjectPath: "/home/user/project",
+			Dir:         tmpDir,
+			FileMtime:   now.Add(-30 * time.Second),
+		},
+		{
+			SessionID:   "session-b",
+			ProjectPath: "/home/user/project",
+			Dir:         tmpDir,
+			FileMtime:   now.Add(-2 * time.Second), // more recent
+		},
+	}
+
+	m.reconcileWindows(sessions)
+
+	// Both windows must remain under their own session IDs.
+	if mw, ok := m.managedWindows["session-a"]; !ok || mw.windowID != "@1" {
+		t.Error("session-a should still own window @1")
+	}
+	if mw, ok := m.managedWindows["session-b"]; !ok || mw.windowID != "@2" {
+		t.Error("session-b should still own window @2")
+	}
+}
+
+func TestReconcileWindows_SupersededRekeys(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+	tmpDir := t.TempDir()
+
+	// When a session is confirmed superseded (forkedFrom), the window should
+	// be re-keyed to the most recent successor.
+	forkedJSONL := `{"forkedFrom":{"sessionId":"old-id"}}` + "\n"
+	os.WriteFile(filepath.Join(tmpDir, "new-id.jsonl"), []byte(forkedJSONL), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "old-id.jsonl"), []byte(""), 0644)
+
 	m := &model{
 		replacedSessions: make(map[string]bool),
 		managedWindows: map[string]managedWindow{
@@ -165,29 +232,27 @@ func TestReconcileWindows_PicksMostRecent(t *testing.T) {
 			SessionID:   "old-id",
 			ProjectPath: "/home/user/project",
 			Dir:         tmpDir,
-			FileMtime:   now.Add(-5 * time.Minute), // stale
+			FileMtime:   now.Add(-5 * time.Minute),
 		},
 		{
-			SessionID:   "session-a",
+			SessionID:   "new-id",
 			ProjectPath: "/home/user/project",
 			Dir:         tmpDir,
-			FileMtime:   now.Add(-10 * time.Second),
+			FileMtime:   now.Add(-2 * time.Second),
 		},
-		{
-			SessionID:   "session-b",
-			ProjectPath: "/home/user/project",
-			Dir:         tmpDir,
-			FileMtime:   now.Add(-2 * time.Second), // most recent
-		},
+	}
+
+	for i := range sessions {
+		claude.ReadTokenUsageForTest(&sessions[i])
 	}
 
 	m.reconcileWindows(sessions)
 
 	if _, ok := m.managedWindows["old-id"]; ok {
-		t.Error("old entry should be deleted")
+		t.Error("superseded old-id should be removed")
 	}
-	if _, ok := m.managedWindows["session-b"]; !ok {
-		t.Error("expected entry under most recent session-b")
+	if _, ok := m.managedWindows["new-id"]; !ok {
+		t.Error("window should be re-keyed to new-id")
 	}
 }
 
