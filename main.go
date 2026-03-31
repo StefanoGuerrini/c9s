@@ -1218,6 +1218,12 @@ func (m *model) reconcileWindows(sessions []claude.SessionInfo) {
 			if s.FileMtime.IsZero() {
 				continue
 			}
+			// Skip sessions already tracked by another managed window.
+			// This prevents a new-* window from stealing a session that
+			// already has its own window.
+			if _, alreadyTracked := m.managedWindows[s.SessionID]; alreadyTracked {
+				continue
+			}
 			// Must be recent (< 60s) AND newer than the tracked session.
 			if time.Since(s.FileMtime) < 60*time.Second &&
 				s.FileMtime.After(trackedMtime) &&

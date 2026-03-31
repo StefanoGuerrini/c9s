@@ -55,6 +55,47 @@ func TestReconcileWindows_NewSession(t *testing.T) {
 	}
 }
 
+func TestReconcileWindows_NewSessionSkipsAlreadyTracked(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+
+	// A new-* window should NOT steal a session that's already tracked by another window.
+	m := &model{
+		replacedSessions: make(map[string]bool),
+		managedWindows: map[string]managedWindow{
+			"existing-session": {
+				windowID:  "@1",
+				sessionID: "existing-session",
+				project:   "/home/user/project",
+			},
+			"new-999": {
+				windowID:  "@2",
+				sessionID: "",
+				project:   "/home/user/project",
+			},
+		},
+	}
+
+	sessions := []claude.SessionInfo{
+		{
+			SessionID:   "existing-session",
+			ProjectPath: "/home/user/project",
+			FileMtime:   time.Now(), // recent and active
+		},
+	}
+
+	m.reconcileWindows(sessions)
+
+	// @1 should still track existing-session.
+	if mw, ok := m.managedWindows["existing-session"]; !ok || mw.windowID != "@1" {
+		t.Error("existing-session should still own window @1")
+	}
+	// new-999 should NOT have been re-keyed to existing-session.
+	if _, ok := m.managedWindows["new-999"]; !ok {
+		t.Error("new-999 should still exist (no valid target to re-key to)")
+	}
+}
+
 func TestReconcileWindows_Fork(t *testing.T) {
 	tmux.DryRun = true
 	t.Cleanup(func() { tmux.DryRun = false })

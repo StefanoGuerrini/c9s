@@ -169,7 +169,7 @@ func shellQuoteJoin(args []string) string {
 func ListWindows() ([]WindowInfo, error) {
 	out, err := exec.Command("tmux", "list-windows",
 		"-t", SessionName,
-		"-F", "#{window_id}\t#{window_name}\t#{pane_current_command}\t#{@c9s-session-id}",
+		"-F", "#{window_id}\t#{window_name}\t#{pane_current_command}\t#{@session-id}",
 	).Output()
 	if err != nil {
 		return nil, err
@@ -201,7 +201,7 @@ type WindowInfo struct {
 	ID        string // e.g. @1
 	Name      string // window name
 	Command   string // current pane command
-	SessionID string // @c9s-session-id user option (empty if not set)
+	SessionID string // @session-id user option (empty if not set)
 }
 
 // PaneStatus represents the state of a claude session inside a tmux pane.
