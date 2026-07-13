@@ -1,0 +1,62 @@
+# c9s
+
+> Terminal dashboard for Claude Code. c9s is a k9s-inspired TUI that shows every Claude Code session across every project in a single view. It reads directly from `~/.claude/` (no daemon, no API, no network beyond an optional OAuth usage check), runs each session in its own tmux window, and surfaces live status (processing / waiting / done) via Claude Code hooks. Single Go binary plus tmux; MIT-licensed; macOS and Linux.
+
+c9s targets developers who run many concurrent Claude Code sessions and lose track of which one is waiting for input, which one is streaming, and which one they left half-finished yesterday. If you have used k9s for Kubernetes, the model is the same: a keyboard-driven table, cheap to launch, kills the need to hunt through terminals.
+
+Non-goals worth stating up front: c9s does not proxy Claude Code, does not orchestrate multi-agent workflows, does not send data anywhere. Live status is powered by official Claude Code hooks that write a small per-session state file under `~/.c9s/state/`; nothing hits the network unless you explicitly turn on the optional ntfy.sh phone-notification forwarder.
+
+## Docs
+
+- [Homepage](https://stefanoguerrini.dev/c9s/): one-page overview with install commands and the animated demo
+- [README](https://github.com/StefanoGuerrini/c9s#readme): full reference covering features, keybindings, session and pane status semantics, worktree hierarchy, API usage tracking, and configuration
+- [Releases](https://github.com/StefanoGuerrini/c9s/releases): tagged versions with changelog and prebuilt binaries for darwin/linux × amd64/arm64
+- [Issues](https://github.com/StefanoGuerrini/c9s/issues): bug reports and feature requests
+- [Source](https://github.com/StefanoGuerrini/c9s): repository root
+
+## Install
+
+- Homebrew: `brew install stefanoguerrini/tap/c9s`
+- Go: `go install github.com/stefanoguerrini/c9s@latest`
+- Source: `git clone https://github.com/stefanoguerrini/c9s && cd c9s && go build -o c9s .`
+
+Run `c9s` from any shell. It auto-creates a tmux session and attaches, or re-attaches if one is already running. `c9s --demo` shows the dashboard with fake data.
+
+Live pane status requires one setup step: `c9s install` merges the required Claude Code hooks into `~/.claude/settings.json`. `c9s uninstall` removes them cleanly.
+
+## Core concepts
+
+- **Session**: one Claude Code conversation, identified by a session ID and backed by a JSONL file under `~/.claude/projects/<encoded-cwd>/<id>.jsonl`.
+- **Session lifecycle status**: `active` (JSONL modified in the last five minutes) / `idle` (claude process running) / `resumable` (JSONL exists on disk) / `archived` (only in history).
+- **Pane status** (managed sessions only): `processing` / `waiting` / `done` / `unknown`. Sourced from Claude Code hooks that update a per-session state file c9s reads on every tick.
+- **Managed window**: a tmux window c9s opened. c9s tags windows with the session ID so it can adopt them after a restart.
+- **Worktree**: c9s discovers git worktrees per project and, when grouping by project, renders a two-level hierarchy (project → worktree → sessions) with per-worktree dirty / ahead / behind indicators. `a` adds a worktree, `d` removes one.
+
+## Keybindings (dashboard)
+
+- Navigate: `j`/`k` or arrows
+- Open / resume: `Enter`
+- New session: `n` (in the project picker), `N` (chain into the effort picker)
+- Close managed window: `x`
+- Rename: `R`; backup JSONL: `b`; search: `/`; clear filter: `Esc`
+- Cycle grouping: `Tab` (none → project → status)
+- Toggle preview panel: `p`; toggle token column: `t`
+- Worktrees (only when `groupBy=project` and `worktrees=on`): `w` toggle, `a` add, `d` delete
+- Config editor: `c`; usage history: `u`; quit: `q` or `Ctrl+c`
+
+## Configuration
+
+Config lives at `~/.c9s/config.json`. Edit in-app with `c` or by hand. Settable knobs include refresh interval, scroll speed, default work directory, keep-alive behavior on quit, hide-archived filter, desktop notifications (via `c9s install` hooks), optional ntfy.sh phone push, usage-history recording, worktrees on/off, tmux navigation keybindings, and a custom color theme.
+
+## Requirements
+
+- macOS or Linux (tmux does not run natively on Windows)
+- tmux 3.7 or newer
+- Go 1.24+ only if building from source
+
+## Optional
+
+- [Related project: agent-deck](https://github.com/asheshgoplani/agent-deck): a more feature-rich multi-agent dashboard
+- [Related project: ntm](https://github.com/Dicklesworthstone/ntm): tmux session manager for parallel AI coding agents
+- [claude-chill](https://github.com/davidbeesley/claude-chill): PTY proxy that wraps Claude's output in synchronized frames (helps if you see flickering)
+- [Ghostty](https://ghostty.org/): terminal with native synchronized output; another flicker-mitigation path
