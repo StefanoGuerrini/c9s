@@ -153,6 +153,52 @@ func TestListAllSessionsFromHistory(t *testing.T) {
 	}
 }
 
+// TestListAllSessionsWorktreeJSONL covers the case where Claude records a
+// session's `project` as the repo root but stores its JSONL under a worktree
+// encoded subdir. Before this fix, c9s looked for the JSONL under the
+// ProjectDir(ProjectPath) — the repo — didn't find it, and marked the session
+// as archived. Now the sweep-all-subdirs index finds it and promotes to
+// resumable, and Cwd points at the actual worktree.
+func TestListAllSessionsWorktreeJSONL(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	// Reset the package-level index cache so this test doesn't see leftovers
+	// from a previous run.
+	jsonlIndexCache.index = nil
+
+	historyPath := filepath.Join(tmpHome, ".claude", "history.jsonl")
+	os.MkdirAll(filepath.Dir(historyPath), 0755)
+	history := `{"display":"in a worktree","timestamp":1783932681740,"project":"/Users/test/repo","sessionId":"wt-session"}` + "\n"
+	os.WriteFile(historyPath, []byte(history), 0644)
+
+	// Place the JSONL under the worktree encoded dir, not the repo dir.
+	worktreeEncoded := ProjectDir("/Users/test/repo/.claude/worktrees/feat")
+	os.MkdirAll(worktreeEncoded, 0755)
+	jsonlPath := filepath.Join(worktreeEncoded, "wt-session.jsonl")
+	// Needs to be >= 500 bytes to escape the stub-file skip in
+	// listAllSessionsFrom.
+	payload := strings.Repeat(`{"type":"user","message":{"content":"hi"}}`+"\n", 20)
+	os.WriteFile(jsonlPath, []byte(payload), 0644)
+
+	sessions, err := ListAllSessions()
+	if err != nil {
+		t.Fatalf("ListAllSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	s := sessions[0]
+	if s.Status != StatusResumable && s.Status != StatusActive {
+		t.Errorf("expected resumable/active status, got %s", s.Status)
+	}
+	if s.ProjectPath != "/Users/test/repo" {
+		t.Errorf("ProjectPath = %q, want /Users/test/repo", s.ProjectPath)
+	}
+	if s.Cwd != "/Users/test/repo/.claude/worktrees/feat" {
+		t.Errorf("Cwd = %q, want /Users/test/repo/.claude/worktrees/feat", s.Cwd)
+	}
+}
+
 func TestListAllSessionsEmptyHistory(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)

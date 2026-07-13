@@ -15,8 +15,135 @@ func TestInSession(t *testing.T) {
 }
 
 func TestSessionName(t *testing.T) {
+	saved := SessionName
+	t.Cleanup(func() { SessionName = saved })
 	if SessionName != "c9s" {
 		t.Errorf("SessionName = %q, want %q", SessionName, "c9s")
+	}
+	SetCurrentSession("c9s-7")
+	if CurrentSession() != "c9s-7" {
+		t.Errorf("CurrentSession() = %q, want %q", CurrentSession(), "c9s-7")
+	}
+	SetCurrentSession("")
+	if CurrentSession() != "c9s-7" {
+		t.Errorf("SetCurrentSession(\"\") should be a no-op, got %q", CurrentSession())
+	}
+}
+
+func TestIsC9sSessionName(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"c9s", true},
+		{"c9s-2", true},
+		{"c9s-12", true},
+		{"c9s-", false},
+		{"c9s-a", false},
+		{"c9stuff", false},
+		{"", false},
+		{"other", false},
+	}
+	for _, c := range cases {
+		if got := isC9sSessionName(c.in); got != c.want {
+			t.Errorf("isC9sSessionName(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestPickSessionName(t *testing.T) {
+	savedSessions := listSessionsFn
+	savedClients := listClientsFn
+	t.Cleanup(func() {
+		listSessionsFn = savedSessions
+		listClientsFn = savedClients
+	})
+
+	tests := []struct {
+		name     string
+		sessions []string
+		clients  map[string]string // session name → list-clients output
+		force    bool
+		want     string
+	}{
+		{
+			name:     "no sessions yields c9s",
+			sessions: nil,
+			want:     "c9s",
+		},
+		{
+			name:     "idle c9s is reused",
+			sessions: []string{"c9s", "other"},
+			clients:  map[string]string{"c9s": ""},
+			want:     "c9s",
+		},
+		{
+			name:     "busy c9s forces c9s-2",
+			sessions: []string{"c9s"},
+			clients:  map[string]string{"c9s": "/dev/ttys001"},
+			want:     "c9s-2",
+		},
+		{
+			name:     "prefer idle c9s-3 over creating c9s-4",
+			sessions: []string{"c9s", "c9s-2", "c9s-3"},
+			clients: map[string]string{
+				"c9s":   "/dev/ttys001",
+				"c9s-2": "/dev/ttys002",
+				"c9s-3": "",
+			},
+			want: "c9s-3",
+		},
+		{
+			name:     "all busy creates next free name",
+			sessions: []string{"c9s", "c9s-2"},
+			clients: map[string]string{
+				"c9s":   "/dev/ttys001",
+				"c9s-2": "/dev/ttys002",
+			},
+			want: "c9s-3",
+		},
+		{
+			name:     "force skips idle reuse",
+			sessions: []string{"c9s"},
+			clients:  map[string]string{"c9s": ""},
+			force:    true,
+			want:     "c9s-2",
+		},
+		{
+			name:     "non-c9s sessions are ignored",
+			sessions: []string{"work", "c9s-2"},
+			clients:  map[string]string{"c9s-2": "/dev/ttys001"},
+			want:     "c9s",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			listSessionsFn = func() ([]string, error) { return tc.sessions, nil }
+			listClientsFn = func(name string) (string, error) {
+				return tc.clients[name], nil
+			}
+			if got := PickSessionName(tc.force); got != tc.want {
+				t.Errorf("PickSessionName(force=%v) = %q, want %q", tc.force, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestListC9sSessions_Order(t *testing.T) {
+	saved := listSessionsFn
+	t.Cleanup(func() { listSessionsFn = saved })
+	listSessionsFn = func() ([]string, error) {
+		return []string{"work", "c9s-10", "c9s-2", "c9s", "other"}, nil
+	}
+	got := ListC9sSessions()
+	want := []string{"c9s", "c9s-2", "c9s-10"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("ListC9sSessions()[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 
@@ -41,6 +168,7 @@ func TestPaneStatusString(t *testing.T) {
 		{PaneProcessing, "processing"},
 		{PaneWaiting, "waiting"},
 		{PaneDone, "done"},
+		{PaneUnknown, "unknown"},
 	}
 	for _, tt := range tests {
 		if got := tt.s.String(); got != tt.want {
@@ -60,78 +188,6 @@ func TestRenameWindowNonexistent(t *testing.T) {
 	err := RenameWindow("nosession:nowindow.99", "newname")
 	if err == nil {
 		t.Error("expected error for nonexistent window")
-	}
-}
-
-func TestClassifyPrompt(t *testing.T) {
-	tests := []struct {
-		name       string
-		content    string
-		wantAtMain bool
-	}{
-		{
-			"at main prompt (real capture)",
-			"⏺ Could you be more specific?\n\n" +
-				"───────────────────────────────────\n" +
-				"❯ \n" +
-				"───────────────────────────────────\n" +
-				"  -- INSERT --\n\n\n",
-			true,
-		},
-		{
-			"at main prompt with trailing blanks",
-			"Done!\n" +
-				"─────\n" +
-				"❯\n" +
-				"─────\n" +
-				"  -- INSERT --\n\n\n\n\n\n",
-			true,
-		},
-		{
-			"at main prompt NORMAL mode",
-			"output\n" +
-				"───────\n" +
-				"❯ some text\n" +
-				"───────\n" +
-				"  -- NORMAL --\n",
-			true,
-		},
-		{
-			"tool approval prompt (not main)",
-			"⏺ I need to run this command:\n" +
-				"  git status\n\n" +
-				"  Allow  Deny\n\n",
-			false,
-		},
-		{
-			"processing output (not main)",
-			"Here is the code:\n```go\nfunc main() {\n",
-			false,
-		},
-		{
-			"user message echo ❯ not at prompt",
-			"❯ do something\n\n⏺ Working on it...\nEditing files...\n",
-			false,
-		},
-		{
-			"empty content",
-			"\n\n\n",
-			false,
-		},
-		{
-			"question from claude (not main)",
-			"⏺ Which approach would you prefer?\n" +
-				"  1. Option A\n" +
-				"  2. Option B\n\n",
-			false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := classifyPrompt(tt.content); got != tt.wantAtMain {
-				t.Errorf("classifyPrompt() = %v, want %v", got, tt.wantAtMain)
-			}
-		})
 	}
 }
 
@@ -178,20 +234,3 @@ func TestShellQuoteJoin(t *testing.T) {
 	}
 }
 
-func TestIsBoxLine(t *testing.T) {
-	tests := []struct {
-		input string
-		want  bool
-	}{
-		{"───────────", true},
-		{"━━━━━━━━━", true},
-		{"── hello ──", false},
-		{"", false},
-		{"regular text", false},
-	}
-	for _, tt := range tests {
-		if got := isBoxLine(tt.input); got != tt.want {
-			t.Errorf("isBoxLine(%q) = %v, want %v", tt.input, got, tt.want)
-		}
-	}
-}

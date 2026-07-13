@@ -126,6 +126,91 @@ func TestCreateWorktree(t *testing.T) {
 	}
 }
 
+func TestListWorktrees_DirtyAheadBehind(t *testing.T) {
+	if !Available() {
+		t.Skip("git not installed")
+	}
+
+	dir := realpath(t, t.TempDir())
+	initRepo(t, dir)
+
+	// Clean tree, no upstream → all zero.
+	wts := ListWorktrees(dir)
+	if len(wts) != 1 {
+		t.Fatalf("expected 1 worktree, got %d", len(wts))
+	}
+	if wts[0].Dirty {
+		t.Error("fresh repo should not be dirty")
+	}
+	if wts[0].Ahead != 0 || wts[0].Behind != 0 {
+		t.Errorf("no upstream: ahead/behind = %d/%d, want 0/0", wts[0].Ahead, wts[0].Behind)
+	}
+
+	// Make a tracked file dirty.
+	readme := filepath.Join(dir, "README")
+	if err := os.WriteFile(readme, []byte("dirty"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !ListWorktrees(dir)[0].Dirty {
+		t.Error("modified tracked file should show as dirty")
+	}
+
+	// Untracked files alone should NOT mark the worktree dirty — that signal
+	// is too noisy to be useful.
+	run(t, dir, "git", "checkout", "--", "README")
+	if err := os.WriteFile(filepath.Join(dir, "scratch.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if ListWorktrees(dir)[0].Dirty {
+		t.Error("untracked file alone must not be reported as dirty")
+	}
+}
+
+func TestRemoveWorktree(t *testing.T) {
+	if !Available() {
+		t.Skip("git not installed")
+	}
+
+	dir := filepath.Join(realpath(t, t.TempDir()), "myrepo")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	initRepo(t, dir)
+
+	wtPath, err := CreateWorktree(dir, "feature-x")
+	if err != nil {
+		t.Fatalf("CreateWorktree: %v", err)
+	}
+	if len(ListWorktrees(dir)) != 2 {
+		t.Fatalf("expected 2 worktrees after create")
+	}
+
+	if err := RemoveWorktree(dir, wtPath, false); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+	if len(ListWorktrees(dir)) != 1 {
+		t.Errorf("expected 1 worktree after remove")
+	}
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Errorf("worktree dir should be gone, stat err = %v", err)
+	}
+
+	// Force-remove a dirty worktree.
+	wt2, err := CreateWorktree(dir, "feature-y")
+	if err != nil {
+		t.Fatalf("CreateWorktree feature-y: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt2, "README"), []byte("dirty"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveWorktree(dir, wt2, false); err == nil {
+		t.Error("expected non-force remove of dirty worktree to fail")
+	}
+	if err := RemoveWorktree(dir, wt2, true); err != nil {
+		t.Errorf("force remove failed: %v", err)
+	}
+}
+
 func TestParsePorcelain(t *testing.T) {
 	input := `worktree /home/user/project
 HEAD abc123

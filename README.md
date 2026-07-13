@@ -34,7 +34,7 @@ It reads directly from `~/.claude/`. No API calls, no network, no daemon. One bi
 - **Group by project or status** -- cycle grouping modes with `Tab`
 - **Token usage** -- see total tokens per session
 - **Rename sessions** -- give sessions meaningful names
-- **Git worktree awareness** *(beta)* -- see worktrees per session, open sessions in any worktree
+- **Git worktrees** -- group sessions by worktree, add/delete worktrees from the dashboard, see dirty / ahead / behind at a glance
 - **API usage tracking** -- see your 5-hour and 7-day utilization in the status bar and a dedicated history screen
 - **Mouse scroll** -- scroll through Claude conversation history, hold Shift/Option to copy text
 - **Persistent dashboard state** -- toggles (tokens, preview, grouping, worktrees) survive restarts
@@ -90,7 +90,9 @@ Want to try it without real sessions? Run `c9s --demo` to see the dashboard with
 | `Tab` | Cycle grouping: none / project / status |
 | `p` | Toggle preview panel |
 | `t` | Toggle token column |
-| `w` | Toggle worktree sub-rows (when enabled) |
+| `w` | Toggle worktrees for the selected project (when `worktrees: on`) |
+| `a` | Add a worktree on the selected project (prompts for branch name) |
+| `d` | Delete the worktree under the cursor (confirms; force-prompts if dirty) |
 | `u` | Usage history screen |
 | `c` | Open config editor |
 | `q` / `Ctrl+c` | Quit (or detach if keep_alive is on) |
@@ -125,20 +127,30 @@ For sessions opened through c9s, you also see real-time pane status:
 | **processing** | Claude is actively generating output |
 | **waiting** | Claude needs your input (tool approval, question) |
 | **done** | Task completed, at the main prompt |
+| **unknown** | Hooks not installed for this session -- run `c9s install` |
 
-## Git worktrees (beta)
+Live pane status is sourced from Claude Code's official extension points
+(`statusLine` + `SessionStart`/`UserPromptSubmit`/`Stop`/`Notification`/`SessionEnd`
+hooks). Run `c9s install` once to merge these into `~/.claude/settings.json`
+and `c9s uninstall` to remove them. Install is idempotent and preserves any
+other hooks or statusLine entries you already have.
 
-If you use git worktrees for parallel development, c9s can show them in the dashboard. This feature is **off by default** -- enable it in the config editor (`c` → Worktrees → Mode).
+## Git worktrees
 
-| Mode | Behavior |
-|------|----------|
-| `off` | Worktrees disabled (default) |
-| `auto` | Show worktrees when a project has 2+ worktrees |
-| `always` | Always show worktrees |
+If you use git worktrees for parallel development, c9s can group sessions by their worktree. The feature is **off by default** -- enable it in the config editor (`c` → Worktrees → Mode) or set `"worktrees": "on"` in `~/.c9s/config.json`.
 
-Once enabled, press `w` to toggle worktree sub-rows beneath sessions. Select a worktree and press `Enter` to start a new Claude session in that directory.
+When worktrees are on **and** you're grouping by project (`Tab`), each project group unfolds into a two-level hierarchy: the project header, then one row per worktree, with the sessions living in each worktree nested underneath. Worktree rows show branch, dirty state (`⚠`), and ahead/behind counts (`↑N` / `↓N`) against upstream. Worktrees with no sessions still appear with a dim placeholder you can `Enter` on to start a session there.
 
-This feature is in beta -- we're still evaluating the best experience while keeping c9s simple.
+Managing worktrees from the dashboard (only when the cursor is inside a project group):
+
+| Key | Action |
+|-----|--------|
+| `w` | Collapse/expand the selected worktree (or all worktrees, when the cursor is on a project header) |
+| `a` | Add a new worktree (prompts for branch name; created at `<repo>-<branch>`) |
+| `d` | Delete the worktree under the cursor (confirms; force-prompts if dirty; refuses the main worktree) |
+| `Enter` | On a worktree row: start a new Claude session in that worktree's directory |
+
+Discovery is live -- running `git worktree add/remove` in another terminal shows up within one dashboard tick.
 
 ## API usage tracking
 
@@ -151,12 +163,9 @@ The status bar shows your current 5-hour utilization percentage. A `?` suffix in
 | Value | What's shown |
 |-------|-------------|
 | `percent` | 5-hour utilization % (default) |
-| `cost` | Estimated session cost |
 | `tokens` | Total tokens across sessions |
-| `all` | Tokens, cost, and percent |
+| `tokens,percent` | Both, separated by ` · ` |
 | `off` | Nothing |
-
-Combine values with commas, e.g. `cost,percent`.
 
 ### Usage history
 
@@ -190,9 +199,12 @@ Configurable settings:
 - **Scroll speed** -- lines per mouse scroll event in session windows (1-10)
 - **Work directory** -- default directory for new sessions (empty = current directory)
 - **Keep alive** -- when on, quitting c9s detaches instead of killing sessions. Claude keeps running in the background, re-run `c9s` to re-attach
-- **Status bar usage** -- what metrics to show in the tmux status bar (percent/cost/tokens/all/off)
+- **Hide archived** -- when on, sessions with no JSONL on disk are omitted from the dashboard
+- **Status bar usage** -- what metrics to show in the tmux status bar (`percent` / `tokens` / `tokens,percent` / `off`)
+- **Desktop notifications** -- attention alerts when Claude needs input (requires `c9s install`)
+- **Phone notifications** -- optionally forward alerts to your phone via [ntfy.sh](https://ntfy.sh)
 - **Usage history** -- enable/disable recording, reset history
-- **Worktrees** -- mode (off/auto/always) and expand behavior (all/selected)
+- **Worktrees** -- toggle off/on. When on and you group by project (`Tab`), sessions nest under their worktree
 - **Navigation keys** -- tmux keybindings for dashboard/next/prev session (default: `Ctrl+d`, `Ctrl+n`, `Ctrl+p`)
 - **Color theme** -- switch between `default` and `custom`, then tweak individual colors
 - **All colors** -- title, header, status indicators, preview panel, tmux status bar

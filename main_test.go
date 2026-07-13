@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/stefanoguerrini/c9s/internal/claude"
-	"github.com/stefanoguerrini/c9s/internal/git"
 	"github.com/stefanoguerrini/c9s/internal/tmux"
 )
 
@@ -484,8 +483,8 @@ func TestSelectedSessionPreservedOnReorder(t *testing.T) {
 		cursor:            1, // pointing at "bbb"
 		replacedSessions:  make(map[string]bool),
 		managedWindows:    make(map[string]managedWindow),
-		expandedWorktrees: make(map[int]bool),
-		worktreeCache:     make(map[string][]git.Worktree),
+		collapsedWorktrees: make(map[string]bool),
+		worktreeCache:     make(map[string]worktreeCacheEntry),
 		height:            40,
 		width:             120,
 	}
@@ -542,8 +541,8 @@ func TestStartProjectPickerOrdering(t *testing.T) {
 		},
 		managedWindows:    make(map[string]managedWindow),
 		replacedSessions:  make(map[string]bool),
-		expandedWorktrees: make(map[int]bool),
-		worktreeCache:     make(map[string][]git.Worktree),
+		collapsedWorktrees: make(map[string]bool),
+		worktreeCache:     make(map[string]worktreeCacheEntry),
 	}
 
 	result, _ := m.startProjectPicker(nil, false)
@@ -582,8 +581,8 @@ func TestStartProjectPickerNoWorkDir(t *testing.T) {
 		insideTmux:        true,
 		managedWindows:    make(map[string]managedWindow),
 		replacedSessions:  make(map[string]bool),
-		expandedWorktrees: make(map[int]bool),
-		worktreeCache:     make(map[string][]git.Worktree),
+		collapsedWorktrees: make(map[string]bool),
+		worktreeCache:     make(map[string]worktreeCacheEntry),
 	}
 
 	result, _ := m.startProjectPicker(nil, false)
@@ -608,8 +607,8 @@ func TestProjectPickerFilter(t *testing.T) {
 	m := &model{
 		managedWindows:    make(map[string]managedWindow),
 		replacedSessions:  make(map[string]bool),
-		expandedWorktrees: make(map[int]bool),
-		worktreeCache:     make(map[string][]git.Worktree),
+		collapsedWorktrees: make(map[string]bool),
+		worktreeCache:     make(map[string]worktreeCacheEntry),
 	}
 
 	result, _ := m.startProjectPicker(nil, false)

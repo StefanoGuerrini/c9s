@@ -95,7 +95,8 @@ type SessionInfo struct {
 	Modified     time.Time
 	FileMtime    time.Time // mtime of session JSONL file (zero if not on disk)
 	GitBranch    string
-	ProjectPath  string
+	ProjectPath  string // the project as recorded in history.jsonl — the repo root, not necessarily the cwd
+	Cwd          string // the actual working directory where the session ran (from JSONL storage location). May be a worktree subdir of ProjectPath.
 	Dir             string // actual project directory path (e.g. ~/.claude/projects/-Users-foo-bar)
 	Status          Status
 	DemoPaneStatus  int // 0=none, 1=processing, 2=waiting, 3=done (only used in --demo mode)
@@ -144,6 +145,73 @@ func claudeDir() string {
 func ProjectDir(projectPath string) string {
 	encoded := "-" + strings.ReplaceAll(strings.TrimPrefix(projectPath, "/"), "/", "-")
 	return filepath.Join(claudeDir(), "projects", encoded)
+}
+
+// decodeProjectDir reverses the encoding done by ProjectDir. It returns "" when
+// the path doesn't look like a projects subdir. Note that some cwds contain
+// literal '-' characters (like ".claude/worktrees") which round-trip fine
+// because Claude uses '-' as the segment separator; we can't distinguish a '-'
+// in the cwd from a path separator, so the decode is best-effort. That's OK
+// here — we only use the result for exact-match bucketing.
+func decodeProjectDir(encodedDir string) string {
+	base := filepath.Base(encodedDir)
+	if !strings.HasPrefix(base, "-") {
+		return ""
+	}
+	return "/" + strings.ReplaceAll(base[1:], "-", "/")
+}
+
+// jsonlIndex caches the result of buildJSONLIndex, invalidated by the mtime
+// of ~/.claude/projects/. A new session dir bumps that mtime, so we re-scan
+// on any real change but skip the walk on hot ticks.
+var (
+	jsonlIndexCache struct {
+		mtime time.Time
+		index map[string]string
+	}
+)
+
+// buildJSONLIndex scans every subdir of ~/.claude/projects/ and maps each
+// session-id to the absolute path of its JSONL file. Result is cached by the
+// mtime of the projects directory so repeated ListAllSessions calls don't
+// re-walk. Session-ids collide across projects only when the same session was
+// checked in twice (impossible in practice); if it happens, the last-seen
+// wins, which is harmless.
+func buildJSONLIndex() map[string]string {
+	root := filepath.Join(claudeDir(), "projects")
+	fi, err := os.Stat(root)
+	if err != nil {
+		return map[string]string{}
+	}
+	if jsonlIndexCache.index != nil && fi.ModTime().Equal(jsonlIndexCache.mtime) {
+		return jsonlIndexCache.index
+	}
+	index := make(map[string]string, 512)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return index
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		sub := filepath.Join(root, e.Name())
+		files, err := os.ReadDir(sub)
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			name := f.Name()
+			if !strings.HasSuffix(name, ".jsonl") {
+				continue
+			}
+			id := strings.TrimSuffix(name, ".jsonl")
+			index[id] = filepath.Join(sub, name)
+		}
+	}
+	jsonlIndexCache.mtime = fi.ModTime()
+	jsonlIndexCache.index = index
+	return index
 }
 
 // ListAllSessions returns all Claude sessions discovered from
@@ -202,13 +270,21 @@ func listAllSessionsFrom(historyPath string) ([]SessionInfo, error) {
 		}
 	}
 
+	// Build an index of session-id → JSONL path across every project subdir.
+	// Sessions started inside a git worktree end up with a JSONL under the
+	// worktree's encoded path (e.g. -Users-foo-repo--claude-worktrees-feat/…)
+	// while history.jsonl still records the repo root as `project`. The
+	// direct ProjectDir(ProjectPath) lookup would miss those. Scan once here
+	// so every session finds its file regardless of which subdir it lives in.
+	jsonlIndex := buildJSONLIndex()
+
 	// Check JSONL files on disk: resumability, mtime, token usage.
 	now := time.Now()
 	for i := range sessions {
-		if sessions[i].Dir == "" {
+		path, ok := jsonlIndex[sessions[i].SessionID]
+		if !ok {
 			continue
 		}
-		path := filepath.Join(sessions[i].Dir, sessions[i].SessionID+".jsonl")
 		fi, err := os.Stat(path)
 		if err != nil {
 			continue
@@ -220,6 +296,16 @@ func listAllSessionsFrom(historyPath string) ([]SessionInfo, error) {
 		}
 		sessions[i].Status = StatusResumable
 		sessions[i].FileMtime = fi.ModTime()
+		// Record the actual on-disk directory that owns this session so the
+		// dashboard can bucket it under the right worktree in hierarchical
+		// view. This may differ from ProjectPath when the session was started
+		// inside a worktree.
+		if cwd := decodeProjectDir(filepath.Dir(path)); cwd != "" {
+			sessions[i].Cwd = cwd
+			if sessions[i].Dir == "" {
+				sessions[i].Dir = filepath.Dir(path)
+			}
+		}
 
 		// If file was modified very recently, it's actively being used.
 		if now.Sub(fi.ModTime()) < ActiveThreshold {

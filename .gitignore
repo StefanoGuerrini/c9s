@@ -1,3 +1,7 @@
 c9s
 dist/
 *.exe
+
+# Local-only artifacts that shouldn't ship with the repo.
+memory/
+/demo.gif

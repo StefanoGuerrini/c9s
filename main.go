@@ -15,6 +15,8 @@ import (
 	"github.com/stefanoguerrini/c9s/internal/claude"
 	"github.com/stefanoguerrini/c9s/internal/config"
 	"github.com/stefanoguerrini/c9s/internal/git"
+	"github.com/stefanoguerrini/c9s/internal/installer"
+	"github.com/stefanoguerrini/c9s/internal/sessionstate"
 	"github.com/stefanoguerrini/c9s/internal/tmux"
 )
 
@@ -62,6 +64,7 @@ var (
 	stWaiting     lipgloss.Style
 	stProcessing  lipgloss.Style
 	stDone        lipgloss.Style
+	stUnknown     lipgloss.Style
 	previewBorder lipgloss.Style
 	previewLabel  lipgloss.Style
 	previewDim    lipgloss.Style
@@ -85,6 +88,7 @@ func applyColors(c config.Colors) {
 	stWaiting = lipgloss.NewStyle().Foreground(lipgloss.Color(c.Waiting)).Bold(true)
 	stProcessing = lipgloss.NewStyle().Foreground(lipgloss.Color(c.Processing)).Bold(true)
 	stDone = lipgloss.NewStyle().Foreground(lipgloss.Color(c.Done))
+	stUnknown = lipgloss.NewStyle().Foreground(lipgloss.Color(c.Dim))
 	previewBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(c.PreviewBorder))
 	previewLabel = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(c.PreviewLabel))
 	previewDim = lipgloss.NewStyle().Foreground(lipgloss.Color(c.PreviewDim))
@@ -111,14 +115,30 @@ type statusMsg struct {
 
 type clearStatusMsg struct{}
 
-// displayItem is either a group header, a session row, or a worktree sub-row.
+// displayItem is one row of the dashboard table. Rows come in four flavors,
+// selected by exactly one of the bool flags:
+//
+//   - isHeader        — group header (── auto-parser (2 sessions) ──)
+//   - isWorktreeRow   — a worktree row inside a project group
+//   - isEmptyWorktree — a worktree with no sessions (dim placeholder)
+//   - (none set)      — a session row
+//
+// indent carries the visual nesting level so the renderer can prepend the
+// right amount of whitespace: 0 for headers, 1 for worktree rows and for
+// sessions directly under a project header, 2 for sessions nested under a
+// worktree. parentProject and parentWorktree link session/worktree rows back
+// to the project/worktree they belong to, so key handlers can act on the
+// enclosing scope without re-scanning the table.
 type displayItem struct {
-	isHeader      bool
-	header        string
-	session       claude.SessionInfo
-	isWorktreeRow bool         // sub-row showing a worktree
-	worktree      git.Worktree // worktree info for sub-row
-	isLastWT      bool         // last worktree sub-row (for └─ vs ├─)
+	isHeader        bool
+	header          string
+	session         claude.SessionInfo
+	isWorktreeRow   bool
+	isEmptyWorktree bool
+	worktree        git.Worktree
+	indent          int // 0, 1, or 2
+	parentProject   string
+	parentWorktree  string // absolute path of the enclosing worktree, if any
 }
 
 // managedWindow tracks a tmux window we opened for a session.
@@ -182,10 +202,22 @@ type model struct {
 	pickingEffort bool
 	effortWorkDir string // project dir for the new session
 
-	// Worktree display
-	showWorktrees     bool                      // global toggle (for "all" mode)
-	expandedWorktrees map[int]bool              // per-cursor expanded state (for "selected" mode)
-	worktreeCache     map[string][]git.Worktree // project dir → worktrees
+	// Worktree display. Hierarchical view is only active when groupBy=project;
+	// there worktrees are always rendered under the project header, and this
+	// map tracks which individual worktrees have their session sub-list
+	// collapsed. Default is expanded (map miss == show sessions).
+	collapsedWorktrees map[string]bool               // worktree path → collapsed
+	worktreeCache      map[string]worktreeCacheEntry // project dir → cached worktrees + mtime fingerprint
+
+	// Worktree create prompt (a key) — reuses renameInput.
+	addingWorktree    bool
+	addWorktreeRepo   string // repo dir for the worktree being created
+
+	// Worktree delete confirmation (d key).
+	deletingWorktree     bool
+	deleteWorktree       git.Worktree // worktree being deleted
+	deleteWorktreeRepo   string       // repo dir that owns it
+	deleteWorktreeForce  bool         // second-stage prompt: dirty worktree needs --force
 
 	// Config screen
 	configScreen  bool
@@ -206,6 +238,10 @@ type model struct {
 	// Status bar message
 	statusText    string
 	statusIsError bool
+
+	// True when c9s hooks are present in ~/.claude/settings.json. Refreshed
+	// on each tick; drives the dashboard install banner.
+	hooksInstalled bool
 }
 
 func initialModel(sessions []claude.SessionInfo, err error, insideTmux bool) model {
@@ -233,12 +269,12 @@ func initialModel(sessions []claude.SessionInfo, err error, insideTmux bool) mod
 		managedWindows:    make(map[string]managedWindow),
 		replacedSessions:  loadReplacedSessions(),
 		usageDayRange:     14,
-		expandedWorktrees: make(map[int]bool),
-		worktreeCache:     make(map[string][]git.Worktree),
+		collapsedWorktrees: make(map[string]bool),
+		worktreeCache:      make(map[string]worktreeCacheEntry),
 		showTokens:        cfg.Dashboard.ShowTokens,
 		showPreview:       cfg.Dashboard.ShowPreview,
-		showWorktrees:     cfg.Dashboard.ShowWorktrees,
 		groupBy:           groupMode(cfg.Dashboard.GroupBy),
+		hooksInstalled:    installer.IsInstalled(),
 	}
 }
 
@@ -315,14 +351,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// Keep backups up to date with source files.
 			claude.RefreshBackups()
-			// Refresh worktree cache (cheap git calls, only when feature enabled).
-			if cfg.Worktrees != "off" && git.Available() {
+			// Refresh worktree cache (cheap git calls, only when feature
+			// enabled). lookupWorktrees() now invalidates per-entry based on
+			// .git/ mtime, so re-read for projects whose fingerprint shifted.
+			if cfg.Worktrees == "on" && git.Available() {
 				for dir := range m.worktreeCache {
-					m.worktreeCache[dir] = git.ListWorktrees(dir)
+					m.lookupWorktrees(dir)
 				}
 			}
 		}
-		// Update pane statuses for managed windows.
+		// Update pane statuses for managed windows. Status is sourced from
+		// per-session state files written by Claude Code hooks (see
+		// internal/sessionstate, internal/installer). Sessions without a
+		// state file render as PaneUnknown.
+		m.hooksInstalled = installer.IsInstalled()
 		for key, mw := range m.managedWindows {
 			if !tmux.WindowExists(mw.windowID) {
 				debugLog("tick → window %s gone, removing session=%q", mw.windowID, key)
@@ -330,32 +372,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				continue
 			}
 
-			// 1) Check file mtime — if recently written, claude is processing.
-			recentlyActive := false
+			// Refresh tmux per-window usage badge. Prefer hook-pushed state
+			// (input/output tokens, model) when available — that avoids
+			// reopening the session JSONL every tick. Fall back to the
+			// JSONL-derived SessionInfo for sessions started before hooks
+			// were installed.
+			info, infoErr := sessionstate.Read(mw.sessionID)
 			for _, s := range m.sessions {
 				if s.SessionID == mw.sessionID {
-					if !s.FileMtime.IsZero() && time.Since(s.FileMtime) < 10*time.Second {
-						recentlyActive = true
+					var usage string
+					if infoErr == nil {
+						usage = formatUsageFromState(s, info)
+					} else {
+						usage = formatUsage(s)
 					}
-					// Update usage in tmux status bar.
-					if usage := formatUsage(s); usage != "" {
+					if usage != "" {
 						tmux.SetWindowEnv(mw.windowID, "c9s-usage", usage)
 					}
 					break
 				}
 			}
 
-			if recentlyActive {
-				mw.paneStatus = tmux.PaneProcessing
-			} else if tmux.IsAtMainPrompt(mw.windowID) {
-				// 2) At the main ❯ prompt → done (task completed).
-				mw.paneStatus = tmux.PaneDone
-			} else {
-				// 3) Not processing, not at prompt → waiting for user input
-				//    (tool approval, question, etc.)
-				mw.paneStatus = tmux.PaneWaiting
-			}
-
+			mw.paneStatus = paneStatusFromInfo(info, infoErr)
 			m.managedWindows[key] = mw
 		}
 		// Update dashboard status bar with global usage.
@@ -410,6 +448,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.renaming {
 			return m.updateRename(msg)
 		}
+		if m.addingWorktree {
+			return m.updateAddWorktree(msg)
+		}
+		if m.deletingWorktree {
+			return m.updateDeleteWorktree(msg)
+		}
 		if m.searching {
 			return m.updateSearch(msg)
 		}
@@ -427,7 +471,6 @@ func (m model) updateSearch(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.searchInput.Blur()
 		m.cursor = 0
 		m.scroll = 0
-		m.expandedWorktrees = make(map[int]bool)
 		return m, nil
 	case "enter":
 		m.searching = false
@@ -435,7 +478,6 @@ func (m model) updateSearch(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.searchInput.Blur()
 		m.cursor = 0
 		m.scroll = 0
-		m.expandedWorktrees = make(map[int]bool)
 		return m, nil
 	}
 	var cmd tea.Cmd
@@ -443,7 +485,6 @@ func (m model) updateSearch(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.filter = m.searchInput.Value()
 	m.cursor = 0
 	m.scroll = 0
-	m.expandedWorktrees = make(map[int]bool)
 	return m, cmd
 }
 
@@ -517,24 +558,17 @@ func (m model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.scroll = 0
 		}
 	case "w":
-		if cfg.Worktrees != "off" {
-			if cfg.WorktreeExpand == "selected" {
-				m.expandedWorktrees[m.cursor] = !m.expandedWorktrees[m.cursor]
-			} else {
-				m.showWorktrees = !m.showWorktrees
-			}
-			// Populate worktree cache for visible sessions.
-			if !m.demoMode {
-				for _, s := range m.filtered() {
-					if s.ProjectPath != "" {
-						if _, ok := m.worktreeCache[s.ProjectPath]; !ok {
-							m.worktreeCache[s.ProjectPath] = git.ListWorktrees(s.ProjectPath)
-						}
-					}
-				}
-			}
-			m.saveDashboardState()
+		return m.toggleWorktree(items)
+	case "a":
+		if !m.worktreesActive() {
+			return m, statusCmd("worktrees show up when grouped by project — press Tab", false)
 		}
+		return m.startAddWorktree(items)
+	case "d":
+		if !m.worktreesActive() {
+			return m, statusCmd("worktrees show up when grouped by project — press Tab", false)
+		}
+		return m.startDeleteWorktree(items)
 	case "enter":
 		return m.openSession(items)
 	case "n":
@@ -573,11 +607,14 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 		return m, statusCmd("tmux required — run c9s outside tmux to auto-bootstrap", true)
 	}
 
-	// If a worktree sub-row is selected, start a new session in that worktree dir.
-	if m.cursor >= 0 && m.cursor < len(items) && items[m.cursor].isWorktreeRow {
-		wt := items[m.cursor].worktree
-		m.effortWorkDir = wt.Path
-		return m.newSession(nil, "", "")
+	// If a worktree row (populated or empty placeholder) is selected, start a
+	// new session in that worktree dir.
+	if m.cursor >= 0 && m.cursor < len(items) {
+		it := items[m.cursor]
+		if it.isWorktreeRow || it.isEmptyWorktree {
+			m.effortWorkDir = it.worktree.Path
+			return m.newSession(nil, "", "")
+		}
 	}
 
 	s := m.selectedSession(items)
@@ -684,8 +721,35 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 		sessionID: s.SessionID,
 		project:   s.ProjectPath,
 	}
+	seedSessionState(s.SessionID, workDir)
 
 	return m, nil
+}
+
+// seedSessionState writes a minimal state file for a session c9s just opened,
+// but only when one doesn't already exist. Hooks (SessionStart / UserPromptSubmit
+// / Stop, etc.) overwrite this the moment they fire; the seed is just a
+// placeholder so the dashboard has *something* to read for the window while we
+// wait for the first hook to land. Without it, sessions resumed before any
+// hook event ever fires (or whose state file was deleted) sit at "unknown"
+// forever. Errors are swallowed on purpose — this is best-effort book-keeping,
+// not a correctness path.
+func seedSessionState(sessionID, workDir string) {
+	if sessionID == "" {
+		return
+	}
+	if _, err := sessionstate.Read(sessionID); err == nil {
+		return // file exists — hooks own it now
+	}
+	_ = sessionstate.Patch(sessionID, func(i *sessionstate.Info) {
+		if i.State == "" {
+			i.State = sessionstate.StateDone
+		}
+		if i.Cwd == "" {
+			i.Cwd = workDir
+		}
+		i.LastEvent = "c9s-seed"
+	})
 }
 
 // newSession creates a brand new claude session in the selected project.
@@ -1142,22 +1206,6 @@ func fmtTimeAgo(t time.Time) string {
 	}
 }
 
-// getWorktrees returns cached worktrees for a project dir.
-func (m *model) getWorktrees(dir string) []git.Worktree {
-	if m.demoMode {
-		if wts, ok := claude.DemoWorktrees[dir]; ok {
-			return wts
-		}
-		return nil
-	}
-	if wts, ok := m.worktreeCache[dir]; ok {
-		return wts
-	}
-	wts := git.ListWorktrees(dir)
-	m.worktreeCache[dir] = wts
-	return wts
-}
-
 // reconcileWindows matches managed windows to the claude sessions actually
 // running inside them. This handles two cases:
 // 1. New sessions (n key): tracked with tmpKey, sessionID empty
@@ -1330,6 +1378,7 @@ func (m *model) reconcileStartupWindows(sessions []claude.SessionInfo) {
 					sessionID: w.SessionID,
 					project:   s.ProjectPath,
 				}
+				seedSessionState(w.SessionID, s.ProjectPath)
 			}
 		} else {
 			debugLog("startup → orphan window %s name=%q session=%q (not in session list)", w.ID, w.Name, w.SessionID)
@@ -1344,7 +1393,6 @@ func (m model) saveDashboardState() {
 	cfg.Dashboard = config.Dashboard{
 		ShowTokens:       m.showTokens,
 		ShowPreview:      m.showPreview,
-		ShowWorktrees:    m.showWorktrees,
 		GroupBy:          int(m.groupBy),
 		ReplacedSessions: m.replacedSessionsList(),
 	}
@@ -2169,13 +2217,187 @@ func (m model) updateRename(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// worktreesActive reports whether the worktree feature has any effect right
+// now — used to gate the w/a/d handlers and to decide what footer hint to
+// show. Being "active" requires: feature toggled on AND grouping by project
+// (worktrees are project-scoped and only render inside a project group).
+func (m model) worktreesActive() bool {
+	return cfg.Worktrees == "on" && m.groupBy == groupProject
+}
+
+// projectAtCursor returns the repo path associated with the row under the
+// cursor, resolving upward through parent links so any row inside a project
+// group answers with the same project.
+func (m model) projectAtCursor(items []displayItem) string {
+	if m.cursor < 0 || m.cursor >= len(items) {
+		return ""
+	}
+	item := items[m.cursor]
+	if item.parentProject != "" {
+		return item.parentProject
+	}
+	if item.session.ProjectPath != "" {
+		return item.session.ProjectPath
+	}
+	return ""
+}
+
+// toggleWorktree implements the `w` key. Semantics vary by cursor context:
+//
+//   - on a worktree row / empty-worktree placeholder: collapse or expand that
+//     specific worktree's session list.
+//   - on a session row nested under a worktree: collapse the enclosing
+//     worktree.
+//   - on a project header: bulk toggle every worktree under that project
+//     (collapse-all if any is currently expanded, else expand-all).
+//
+// Outside groupBy=project, it prints a footer hint instead of silently doing
+// nothing so the user learns where the feature lives.
+func (m model) toggleWorktree(items []displayItem) (tea.Model, tea.Cmd) {
+	if !m.worktreesActive() {
+		return m, statusCmd("worktrees show up when grouped by project — press Tab", false)
+	}
+	if m.cursor < 0 || m.cursor >= len(items) {
+		return m, nil
+	}
+	item := items[m.cursor]
+	switch {
+	case item.isWorktreeRow || item.isEmptyWorktree:
+		p := item.worktree.Path
+		m.collapsedWorktrees[p] = !m.collapsedWorktrees[p]
+	case item.isHeader && item.parentProject != "":
+		wts := m.lookupWorktrees(item.parentProject)
+		anyExpanded := false
+		for _, wt := range wts {
+			if !m.collapsedWorktrees[wt.Path] {
+				anyExpanded = true
+				break
+			}
+		}
+		for _, wt := range wts {
+			m.collapsedWorktrees[wt.Path] = anyExpanded
+		}
+	case !item.isHeader && item.parentWorktree != "":
+		p := item.parentWorktree
+		m.collapsedWorktrees[p] = !m.collapsedWorktrees[p]
+	}
+	return m, nil
+}
+
+// startAddWorktree opens a single-line prompt for a branch name. Works from
+// any row inside a project group; the new worktree is added to that project.
+func (m model) startAddWorktree(items []displayItem) (tea.Model, tea.Cmd) {
+	repo := m.projectAtCursor(items)
+	if repo == "" {
+		return m, statusCmd("place the cursor on a project row first", true)
+	}
+	if !git.Available() {
+		return m, statusCmd("git not installed", true)
+	}
+	m.addingWorktree = true
+	m.addWorktreeRepo = repo
+	m.renameInput.Prompt = fmt.Sprintf("new worktree branch (in %s): ", filepath.Base(repo))
+	m.renameInput.SetValue("")
+	return m, m.renameInput.Focus()
+}
+
+func (m model) updateAddWorktree(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.addingWorktree = false
+		m.addWorktreeRepo = ""
+		m.renameInput.Blur()
+		return m, nil
+	case "enter":
+		branch := strings.TrimSpace(m.renameInput.Value())
+		repo := m.addWorktreeRepo
+		m.addingWorktree = false
+		m.addWorktreeRepo = ""
+		m.renameInput.Blur()
+		if branch == "" || repo == "" {
+			return m, nil
+		}
+		wtPath, err := git.CreateWorktree(repo, branch)
+		if err != nil {
+			return m, statusCmd(fmt.Sprintf("worktree add: %v", err), true)
+		}
+		// Force a cache refresh so the new worktree renders immediately,
+		// before the next tick. Newly-added worktrees start expanded (the
+		// collapsedWorktrees map treats a miss as expanded).
+		delete(m.worktreeCache, repo)
+		m.lookupWorktrees(repo)
+		return m, statusCmd(fmt.Sprintf("worktree '%s' at %s", branch, wtPath), false)
+	}
+	var cmd tea.Cmd
+	m.renameInput, cmd = m.renameInput.Update(msg)
+	return m, cmd
+}
+
+// startDeleteWorktree triggers the delete confirmation overlay. It works on
+// worktree rows (both populated and empty-placeholder). The main worktree is
+// refused outright — removing it would orphan the repo.
+func (m model) startDeleteWorktree(items []displayItem) (tea.Model, tea.Cmd) {
+	if m.cursor < 0 || m.cursor >= len(items) {
+		return m, nil
+	}
+	item := items[m.cursor]
+	if !item.isWorktreeRow && !item.isEmptyWorktree {
+		return m, statusCmd("place the cursor on a worktree row to delete it", true)
+	}
+	if item.worktree.IsMain {
+		return m, statusCmd("refusing to delete the main worktree", true)
+	}
+	repo := item.parentProject
+	if repo == "" {
+		return m, statusCmd("could not locate owning repo for this worktree", true)
+	}
+	m.deletingWorktree = true
+	m.deleteWorktree = item.worktree
+	m.deleteWorktreeRepo = repo
+	m.deleteWorktreeForce = false
+	return m, nil
+}
+
+func (m model) updateDeleteWorktree(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "n":
+		m.deletingWorktree = false
+		m.deleteWorktree = git.Worktree{}
+		m.deleteWorktreeRepo = ""
+		m.deleteWorktreeForce = false
+		return m, statusCmd("delete cancelled", false)
+	case "y", "enter":
+		wt := m.deleteWorktree
+		repo := m.deleteWorktreeRepo
+		force := m.deleteWorktreeForce
+		err := git.RemoveWorktree(repo, wt.Path, force)
+		if err != nil && !force && wt.Dirty {
+			// First attempt failed; offer a force-confirm instead of bailing.
+			m.deleteWorktreeForce = true
+			return m, nil
+		}
+		m.deletingWorktree = false
+		m.deleteWorktree = git.Worktree{}
+		m.deleteWorktreeRepo = ""
+		m.deleteWorktreeForce = false
+		if err != nil {
+			return m, statusCmd(fmt.Sprintf("worktree remove: %v", err), true)
+		}
+		// Refresh cache so the deleted worktree vanishes immediately.
+		delete(m.worktreeCache, repo)
+		m.lookupWorktrees(repo)
+		return m, statusCmd(fmt.Sprintf("worktree '%s' removed", wt.Branch), false)
+	}
+	return m, nil
+}
+
 // selectedSession returns the session at the cursor, or nil.
 func (m model) selectedSession(items []displayItem) *claude.SessionInfo {
 	if m.cursor < 0 || m.cursor >= len(items) {
 		return nil
 	}
 	item := items[m.cursor]
-	if item.isHeader {
+	if item.isHeader || item.isWorktreeRow || item.isEmptyWorktree {
 		return nil
 	}
 	return &item.session
@@ -2267,7 +2489,12 @@ func (m model) View() tea.View {
 		titleText += fmt.Sprintf(" · %d windows", len(m.managedWindows))
 	}
 	b.WriteString(titleStyle.Render(titleText))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	if !m.hooksInstalled && len(m.managedWindows) > 0 {
+		b.WriteString(dimStyle.Render(" live status disabled — run `c9s install` to enable hooks"))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
 	items := m.items()
 
@@ -2314,21 +2541,33 @@ func (m model) View() tea.View {
 			continue
 		}
 		if item.isWorktreeRow {
-			prefix := "  ├─ "
-			if item.isLastWT {
-				prefix = "  └─ "
+			wt := item.worktree
+			glyph := "▾"
+			if m.collapsedWorktrees[wt.Path] {
+				glyph = "▸"
 			}
-			row := m.renderColumns(
-				"",
-				prefix+item.worktree.Branch,
-				"",
-				"",
-				item.worktree.Path,
-				"",
-				"",
-				"",
-				true, // dim
-			)
+			label := "  " + glyph + " " + wt.Branch
+			// Status glyphs: ⚠ for dirty (tracked changes), ↑N ahead of
+			// upstream, ↓N behind. Quiet when everything is clean & synced.
+			if wt.Dirty {
+				label += " ⚠"
+			}
+			if wt.Ahead > 0 {
+				label += fmt.Sprintf(" ↑%d", wt.Ahead)
+			}
+			if wt.Behind > 0 {
+				label += fmt.Sprintf(" ↓%d", wt.Behind)
+			}
+			row := m.renderColumns("", label, "", "", wt.Path, "", "", "", true)
+			if i == m.cursor {
+				row = selectedStyle.Width(tw).Render(row)
+			}
+			tableLines = append(tableLines, row)
+			continue
+		}
+		if item.isEmptyWorktree {
+			label := "      — no sessions — press Enter to start one here"
+			row := m.renderColumns("", label, "", "", item.worktree.Path, "", "", "", true)
 			if i == m.cursor {
 				row = selectedStyle.Width(tw).Render(row)
 			}
@@ -2337,7 +2576,7 @@ func (m model) View() tea.View {
 		}
 
 		rowNum++
-		row := m.renderRow(rowNum, item.session)
+		row := m.renderRow(rowNum, item.session, item.indent)
 		if i == m.cursor {
 			row = selectedStyle.Width(tw).Render(row)
 		}
@@ -2393,48 +2632,69 @@ func (m model) View() tea.View {
 	return altView(out)
 }
 
-// renderPreview renders the session preview panel.
+// renderPreview renders the right-side preview panel, dispatching to a
+// context-aware body based on the row under the cursor: session rows show
+// session details, worktree rows show branch info + resident sessions,
+// project headers show the project overview, and header/empty rows for
+// worktrees explain what Enter will do there. Keeping all four paths inside
+// this one function lets them share the border/padding math.
 func (m model) renderPreview(width, height int) []string {
 	items := m.items()
-	s := m.selectedSession(items)
-	if s == nil {
-		// No session selected — show empty preview.
-		lines := make([]string, height)
-		lines[0] = previewBorder.Width(width - 2).Render(previewDim.Render(" No session selected"))
-		return lines
+	innerW := width - 4
+
+	var content []string
+	if m.cursor >= 0 && m.cursor < len(items) {
+		it := items[m.cursor]
+		switch {
+		case it.isEmptyWorktree:
+			content = m.previewEmptyWorktree(it, items, innerW)
+		case it.isWorktreeRow:
+			content = m.previewWorktree(it, items, innerW)
+		case it.isHeader:
+			content = m.previewHeader(it, items, innerW)
+		default:
+			content = m.previewSession(&it.session, innerW)
+		}
+	}
+	if len(content) == 0 {
+		content = []string{previewDim.Render(" Nothing selected")}
 	}
 
-	innerW := width - 4 // border + padding
+	maxLines := height - 2
+	if len(content) > maxLines {
+		content = content[:maxLines]
+	}
+	for len(content) < maxLines {
+		content = append(content, "")
+	}
+	inner := strings.Join(content, "\n")
+	bordered := previewBorder.Width(width - 2).Render(inner)
+	return strings.Split(bordered, "\n")
+}
 
+// previewSession renders the classic per-session detail view.
+func (m model) previewSession(s *claude.SessionInfo, innerW int) []string {
 	var content []string
 	addField := func(label, value string) {
 		if value == "" {
 			return
 		}
-		line := previewDim.Render(label+": ") + previewVal.Render(value)
-		content = append(content, line)
+		content = append(content, previewDim.Render(label+": ")+previewVal.Render(value))
 	}
 	addWrap := func(label, value string) {
 		if value == "" {
 			return
 		}
 		content = append(content, previewDim.Render(label+":"))
-		// Word-wrap value to innerW.
 		for _, wl := range wordWrap(value, innerW) {
 			content = append(content, previewVal.Render(wl))
 		}
 	}
 
-	// Title
 	content = append(content, previewLabel.Render(trunc(s.DisplayName(), innerW)))
 	content = append(content, "")
 
-	// Status (with color)
-	status := s.Status.String()
-	if mw, ok := m.managedWindows[s.SessionID]; ok {
-		status = mw.paneStatus.String()
-	}
-	addField("Status", status)
+	addField("Status", m.effectiveStatus(*s))
 	addField("Project", s.ProjectPath)
 	if s.GitBranch != "" {
 		addField("Branch", s.GitBranch)
@@ -2456,7 +2716,6 @@ func (m model) renderPreview(width, height int) []string {
 	addField("Session ID", s.SessionID)
 	content = append(content, "")
 
-	// First prompt / summary
 	if s.FirstPrompt != "" {
 		addWrap("First prompt", s.FirstPrompt)
 	}
@@ -2464,21 +2723,121 @@ func (m model) renderPreview(width, height int) []string {
 		content = append(content, "")
 		addWrap("Summary", s.Summary)
 	}
+	return content
+}
 
-	// Truncate to fit height (minus 2 for border).
-	maxLines := height - 2
-	if len(content) > maxLines {
-		content = content[:maxLines]
+// previewWorktree renders branch/state info for a worktree row plus a short
+// roster of sessions currently living in that worktree (whatever items()
+// bucketed under it).
+func (m model) previewWorktree(it displayItem, items []displayItem, innerW int) []string {
+	wt := it.worktree
+	var content []string
+	title := wt.Branch
+	if wt.IsMain {
+		title += "  (main)"
 	}
-	// Pad to fill.
-	for len(content) < maxLines {
-		content = append(content, "")
+	content = append(content, previewLabel.Render(trunc(title, innerW)))
+	content = append(content, "")
+
+	addField := func(label, value string) {
+		if value == "" {
+			return
+		}
+		content = append(content, previewDim.Render(label+": ")+previewVal.Render(value))
+	}
+	addField("Path", wt.Path)
+	statusBits := []string{}
+	if wt.Dirty {
+		statusBits = append(statusBits, "dirty")
+	}
+	if wt.Ahead > 0 {
+		statusBits = append(statusBits, fmt.Sprintf("↑%d", wt.Ahead))
+	}
+	if wt.Behind > 0 {
+		statusBits = append(statusBits, fmt.Sprintf("↓%d", wt.Behind))
+	}
+	if len(statusBits) == 0 {
+		statusBits = []string{"clean"}
+	}
+	addField("Status", strings.Join(statusBits, " · "))
+
+	// Collect sessions bucketed under this worktree in the current items list.
+	var mine []claude.SessionInfo
+	for _, row := range items {
+		if row.parentWorktree == wt.Path && !row.isHeader && !row.isWorktreeRow && !row.isEmptyWorktree {
+			mine = append(mine, row.session)
+		}
+	}
+	content = append(content, "")
+	content = append(content, previewDim.Render(fmt.Sprintf("Sessions (%d):", len(mine))))
+	if len(mine) == 0 {
+		content = append(content, previewDim.Render("  (none — press Enter to start one)"))
+	} else {
+		for _, s := range mine {
+			content = append(content, previewVal.Render("  · "+trunc(s.DisplayName(), innerW-4)))
+		}
+	}
+	content = append(content, "")
+	content = append(content, previewDim.Render("Enter: new session here"))
+	if !wt.IsMain {
+		content = append(content, previewDim.Render("d:     delete worktree"))
+	}
+	content = append(content, previewDim.Render("a:     add another worktree"))
+	return content
+}
+
+// previewEmptyWorktree is the tighter form used when the cursor lands on the
+// placeholder row of a worktree that has no sessions yet — it's basically the
+// worktree preview with a nudge to press Enter.
+func (m model) previewEmptyWorktree(it displayItem, items []displayItem, innerW int) []string {
+	return m.previewWorktree(it, items, innerW)
+}
+
+// previewHeader shows an overview of whichever group the cursor is on. For
+// project groups this includes the aggregated worktree state; for status
+// groups it just counts.
+func (m model) previewHeader(it displayItem, items []displayItem, innerW int) []string {
+	var content []string
+	content = append(content, previewLabel.Render(trunc(it.header, innerW)))
+	content = append(content, "")
+
+	if it.parentProject != "" {
+		wts := m.lookupWorktrees(it.parentProject)
+		dirty, ahead, behind := 0, 0, 0
+		for _, wt := range wts {
+			if wt.Dirty {
+				dirty++
+			}
+			ahead += wt.Ahead
+			behind += wt.Behind
+		}
+		content = append(content, previewDim.Render("Repo:     ")+previewVal.Render(it.parentProject))
+		if len(wts) > 0 {
+			bits := []string{fmt.Sprintf("%d worktree%s", len(wts), pluralS(len(wts)))}
+			if dirty > 0 {
+				bits = append(bits, fmt.Sprintf("%d dirty", dirty))
+			}
+			if ahead > 0 {
+				bits = append(bits, fmt.Sprintf("↑%d", ahead))
+			}
+			if behind > 0 {
+				bits = append(bits, fmt.Sprintf("↓%d", behind))
+			}
+			content = append(content, previewDim.Render("Worktrees: ")+previewVal.Render(strings.Join(bits, " · ")))
+		}
 	}
 
-	// Render inside border.
-	inner := strings.Join(content, "\n")
-	bordered := previewBorder.Width(width - 2).Render(inner)
-	return strings.Split(bordered, "\n")
+	content = append(content, "")
+	content = append(content, previewDim.Render("w: toggle all worktrees"))
+	content = append(content, previewDim.Render("a: add worktree"))
+	return content
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // wordWrap wraps text to the given width.
@@ -2535,8 +2894,22 @@ func (m model) footer() string {
 			helpKeyStyle.Render("4") + " max  " +
 			helpKeyStyle.Render("esc") + " cancel")
 	}
-	if m.renaming {
+	if m.renaming || m.addingWorktree {
 		return helpStyle.Render(m.renameInput.View())
+	}
+	if m.deletingWorktree {
+		wt := m.deleteWorktree
+		warn := ""
+		if wt.Dirty {
+			warn = errStyle.Render(" [dirty]")
+		}
+		prompt := fmt.Sprintf("delete worktree '%s' at %s%s? ", wt.Branch, wt.Path, warn)
+		if m.deleteWorktreeForce {
+			prompt = fmt.Sprintf("worktree '%s' has uncommitted changes — force remove? ", wt.Branch)
+		}
+		return helpStyle.Render(prompt +
+			helpKeyStyle.Render("y") + " yes  " +
+			helpKeyStyle.Render("n") + " no")
 	}
 	if m.searching {
 		return helpStyle.Render(m.searchInput.View())
@@ -2587,17 +2960,12 @@ func (m model) footer() string {
 		helpKeyStyle.Render("p") + " " + previewLabel,
 		helpKeyStyle.Render("t") + " " + tokenLabel,
 	)
-	if cfg.Worktrees != "off" {
-		wtLabel := "show worktrees"
-		if cfg.WorktreeExpand == "selected" {
-			wtLabel = "expand"
-			if m.expandedWorktrees[m.cursor] {
-				wtLabel = "collapse"
-			}
-		} else if m.showWorktrees {
-			wtLabel = "hide worktrees"
-		}
-		parts = append(parts, helpKeyStyle.Render("w")+" "+wtLabel)
+	if m.worktreesActive() {
+		parts = append(parts,
+			helpKeyStyle.Render("w")+" toggle wt",
+			helpKeyStyle.Render("a")+" add wt",
+			helpKeyStyle.Render("d")+" del wt",
+		)
 	}
 	parts = append(parts,
 		helpKeyStyle.Render("u") + " usage",
@@ -2611,13 +2979,31 @@ func (m model) footer() string {
 	return helpStyle.Render(" " + strings.Join(parts, "  "))
 }
 
-// filtered returns sessions matching the current search filter.
+// effectiveStatus returns the status string to display for a session. When
+// the session has a managed tmux window AND the hook-fed pane status is a
+// specific value (processing/waiting/done), that wins — the pane status is
+// live and more accurate than the file-mtime lifecycle status. When the
+// pane status is Unknown (hooks not installed, no hook fired yet, or the
+// state file is missing/corrupt), we fall back to the lifecycle status
+// because "unknown" alone leaves the user guessing.
+func (m model) effectiveStatus(s claude.SessionInfo) string {
+	if mw, ok := m.managedWindows[s.SessionID]; ok && mw.paneStatus != tmux.PaneUnknown {
+		return mw.paneStatus.String()
+	}
+	return s.Status.String()
+}
+
+// filtered returns sessions matching the current search filter and any
+// visibility toggles (hide-archived, replaced-by-fork).
 func (m model) filtered() []claude.SessionInfo {
 	var out []claude.SessionInfo
 	f := strings.ToLower(m.filter)
+	hideArchived := cfg.HideArchived == "on"
 	for _, s := range m.sessions {
-		// Hide sessions that were replaced by fork/clear.
 		if m.replacedSessions[s.SessionID] {
+			continue
+		}
+		if hideArchived && s.Status == claude.StatusArchived {
 			continue
 		}
 		if m.filter == "" {
@@ -2634,132 +3020,268 @@ func (m model) filtered() []claude.SessionInfo {
 	return out
 }
 
-// items returns display items, optionally grouped.
+// items returns the ordered list of display rows the dashboard renders. Three
+// shapes come out of here depending on the grouping mode and whether the
+// worktree feature has anything to show:
+//
+//  1. groupNone   → flat session list (no headers, no worktree layer).
+//  2. groupStatus → status-bucketed session list with one header per bucket.
+//  3. groupProject → hierarchical when the project has ≥2 worktrees and
+//     worktrees=on: header → worktree rows → session rows nested under the
+//     matching worktree. Falls back to flat sessions under the header when
+//     only one worktree exists.
 func (m model) items() []displayItem {
 	sessions := m.filtered()
-	var base []displayItem
 
+	// Flat: no grouping, no headers, no hierarchy.
 	if m.groupBy == groupNone {
-		base = make([]displayItem, len(sessions))
-		for i, s := range sessions {
-			base[i] = displayItem{session: s}
-		}
-	} else {
-		type group struct {
-			name   string
-			items  []claude.SessionInfo
-			newest time.Time
-			order  int // for fixed ordering in status mode
-		}
-		groups := make(map[string]*group)
-		var order []string
-
+		out := make([]displayItem, 0, len(sessions))
 		for _, s := range sessions {
-			var name string
-			var sortOrder int
-			switch m.groupBy {
-			case groupProject:
-				name = projectName(s.ProjectPath)
-				if name == "" {
-					name = "(no project)"
-				}
-			case groupStatus:
-				// Use the effective status (pane status for managed windows).
-				if mw, ok := m.managedWindows[s.SessionID]; ok {
-					name = mw.paneStatus.String()
-				} else {
-					name = s.Status.String()
-				}
-				// Fixed order: processing, waiting, active, idle, done, resumable, archived.
-				switch name {
-				case "processing":
-					sortOrder = 0
-				case "waiting":
-					sortOrder = 1
-				case "active":
-					sortOrder = 2
-				case "idle":
-					sortOrder = 3
-				case "done":
-					sortOrder = 4
-				case "resumable":
-					sortOrder = 5
-				case "archived":
-					sortOrder = 6
-				}
-			}
+			out = append(out, displayItem{session: s})
+		}
+		return out
+	}
 
-			g, ok := groups[name]
-			if !ok {
-				g = &group{name: name, order: sortOrder}
-				groups[name] = g
-				order = append(order, name)
+	type group struct {
+		name    string
+		items   []claude.SessionInfo
+		newest  time.Time
+		order   int    // fixed order for status mode
+		project string // canonical repo path (groupProject only)
+	}
+	groups := make(map[string]*group)
+	var order []string
+
+	for _, s := range sessions {
+		var name string
+		var sortOrder int
+		var proj string
+		switch m.groupBy {
+		case groupProject:
+			name = projectName(s.ProjectPath)
+			if name == "" {
+				name = "(no project)"
 			}
-			g.items = append(g.items, s)
-			if s.Modified.After(g.newest) {
-				g.newest = s.Modified
+			proj = s.ProjectPath
+		case groupStatus:
+			name = m.effectiveStatus(s)
+			switch name {
+			case "processing":
+				sortOrder = 0
+			case "waiting":
+				sortOrder = 1
+			case "active":
+				sortOrder = 2
+			case "idle":
+				sortOrder = 3
+			case "done":
+				sortOrder = 4
+			case "resumable":
+				sortOrder = 5
+			case "archived":
+				sortOrder = 6
 			}
 		}
 
-		if m.groupBy == groupStatus {
-			sort.Slice(order, func(i, j int) bool {
-				return groups[order[i]].order < groups[order[j]].order
-			})
-		} else {
-			sort.Slice(order, func(i, j int) bool {
-				return groups[order[i]].newest.After(groups[order[j]].newest)
-			})
+		g, ok := groups[name]
+		if !ok {
+			g = &group{name: name, order: sortOrder, project: proj}
+			groups[name] = g
+			order = append(order, name)
+		} else if g.project == "" {
+			g.project = proj
 		}
-
-		for _, name := range order {
-			g := groups[name]
-			base = append(base, displayItem{isHeader: true, header: fmt.Sprintf("%s (%d)", g.name, len(g.items))})
-			for _, s := range g.items {
-				base = append(base, displayItem{session: s})
-			}
+		g.items = append(g.items, s)
+		if s.Modified.After(g.newest) {
+			g.newest = s.Modified
 		}
 	}
 
-	// Insert worktree sub-rows if enabled.
-	if cfg.Worktrees == "off" {
-		return base
+	if m.groupBy == groupStatus {
+		sort.Slice(order, func(i, j int) bool {
+			return groups[order[i]].order < groups[order[j]].order
+		})
+	} else {
+		sort.Slice(order, func(i, j int) bool {
+			return groups[order[i]].newest.After(groups[order[j]].newest)
+		})
 	}
 
 	var result []displayItem
-	sessionIdx := 0 // index of session rows only (for "selected" mode)
-	for _, item := range base {
-		result = append(result, item)
-		if item.isHeader {
-			continue
-		}
-		// Check if we should show worktree sub-rows for this session.
-		show := false
-		if cfg.WorktreeExpand == "all" {
-			show = m.showWorktrees
-		} else {
-			show = m.expandedWorktrees[sessionIdx]
-		}
-		if show && item.session.ProjectPath != "" {
-			wts := m.lookupWorktrees(item.session.ProjectPath)
-			for i, wt := range wts {
-				result = append(result, displayItem{
-					isWorktreeRow: true,
-					worktree:      wt,
-					isLastWT:      i == len(wts)-1,
-				})
+	for _, name := range order {
+		g := groups[name]
+
+		// Hierarchical branch: project + worktrees on + repo has ≥2 worktrees.
+		if m.groupBy == groupProject && cfg.Worktrees == "on" && g.project != "" {
+			wts := m.lookupWorktrees(g.project)
+			if len(wts) >= 2 {
+				result = append(result, m.hierarchicalGroup(g.name, g.project, g.items, wts)...)
+				continue
 			}
 		}
-		sessionIdx++
+
+		// Flat inside the group.
+		result = append(result, displayItem{
+			isHeader:      true,
+			header:        fmt.Sprintf("%s (%d)", g.name, len(g.items)),
+			indent:        0,
+			parentProject: g.project,
+		})
+		for _, s := range g.items {
+			result = append(result, displayItem{
+				session:       s,
+				indent:        1,
+				parentProject: s.ProjectPath,
+			})
+		}
 	}
 	return result
 }
 
-// lookupWorktrees returns worktrees from cache (read-only, no cache mutation).
+// hierarchicalGroup builds the header + worktree-rows + nested session rows for
+// one project group. Sessions bucket to a worktree by exact ProjectPath match;
+// anything unmatched falls back to the main worktree so no session goes missing
+// even if it was started outside git's worktree list.
+func (m model) hierarchicalGroup(name, project string, sessions []claude.SessionInfo, wts []git.Worktree) []displayItem {
+	var out []displayItem
+
+	header := fmt.Sprintf("%s (%d %s · %d %s)",
+		name,
+		len(sessions), plural(len(sessions), "session", "sessions"),
+		len(wts), plural(len(wts), "worktree", "worktrees"),
+	)
+	out = append(out, displayItem{
+		isHeader:      true,
+		header:        header,
+		indent:        0,
+		parentProject: project,
+	})
+
+	// Bucket sessions by worktree Path. Unmatched → main worktree.
+	byWT := make(map[string][]claude.SessionInfo)
+	mainPath := ""
+	for _, wt := range wts {
+		if wt.IsMain {
+			mainPath = wt.Path
+		}
+	}
+	if mainPath == "" && len(wts) > 0 {
+		mainPath = wts[0].Path
+	}
+	for _, s := range sessions {
+		// A session running inside a worktree records its ProjectPath as the
+		// repo root (that's what Claude writes to history.jsonl), but its
+		// JSONL is stored under the worktree's encoded path — we surface
+		// that as Cwd during discovery. Prefer Cwd for worktree bucketing
+		// so worktree-scoped sessions nest under the right row, falling
+		// back to ProjectPath when Cwd wasn't determined.
+		candidates := []string{s.Cwd, s.ProjectPath}
+		hit := ""
+		for _, c := range candidates {
+			if c == "" {
+				continue
+			}
+			for _, wt := range wts {
+				if c == wt.Path {
+					hit = wt.Path
+					break
+				}
+			}
+			if hit != "" {
+				break
+			}
+		}
+		if hit == "" {
+			hit = mainPath
+		}
+		byWT[hit] = append(byWT[hit], s)
+	}
+
+	for _, wt := range wts {
+		out = append(out, displayItem{
+			isWorktreeRow: true,
+			worktree:      wt,
+			indent:        1,
+			parentProject: project,
+		})
+		if m.collapsedWorktrees[wt.Path] {
+			continue
+		}
+		wtSessions := byWT[wt.Path]
+		if len(wtSessions) == 0 {
+			out = append(out, displayItem{
+				isEmptyWorktree: true,
+				worktree:        wt,
+				indent:          2,
+				parentProject:   project,
+				parentWorktree:  wt.Path,
+			})
+			continue
+		}
+		for _, s := range wtSessions {
+			out = append(out, displayItem{
+				session:        s,
+				indent:         2,
+				parentProject:  project,
+				parentWorktree: wt.Path,
+			})
+		}
+	}
+	return out
+}
+
+// plural returns singular when n==1, plural otherwise. Small helper to keep
+// header strings honest without regex-y hacks.
+func plural(n int, singular, plur string) string {
+	if n == 1 {
+		return singular
+	}
+	return plur
+}
+
+// worktreeCacheEntry stores the list of worktrees for one repo along with a
+// fingerprint of the on-disk state that produced it. The fingerprint is the
+// modtime of .git/worktrees/ and .git/index — both files git touches when
+// worktrees come and go or the working tree's HEAD moves. We use this to
+// invalidate the cache when the user runs `git worktree add/remove` in another
+// terminal without forcing a full git call every tick.
+type worktreeCacheEntry struct {
+	worktrees   []git.Worktree
+	fingerprint string
+}
+
+// worktreeFingerprint returns a short string identifying the current state of
+// the worktree-relevant files for a repo. Empty when none exist (still a valid
+// fingerprint — a cache hit on "" means "we already looked and there was
+// nothing", so don't shell out again until something changes).
+func worktreeFingerprint(repoDir string) string {
+	var b strings.Builder
+	for _, sub := range []string{".git/worktrees", ".git/index", ".git/HEAD"} {
+		if fi, err := os.Stat(filepath.Join(repoDir, sub)); err == nil {
+			fmt.Fprintf(&b, "%s:%d:%d|", sub, fi.ModTime().UnixNano(), fi.Size())
+		}
+	}
+	return b.String()
+}
+
+// lookupWorktrees returns the cached worktree list for dir, refreshing it
+// when the on-disk fingerprint has shifted since the last cache write. Maps
+// are reference types, so writes to m.worktreeCache survive across the
+// value-receiver copy.
 func (m model) lookupWorktrees(dir string) []git.Worktree {
 	if m.demoMode {
 		return claude.DemoWorktrees[dir]
 	}
-	return m.worktreeCache[dir]
+	if dir == "" {
+		return nil
+	}
+	fp := worktreeFingerprint(dir)
+	if e, ok := m.worktreeCache[dir]; ok && e.fingerprint == fp {
+		return e.worktrees
+	}
+	wts := git.ListWorktrees(dir)
+	m.worktreeCache[dir] = worktreeCacheEntry{worktrees: wts, fingerprint: fp}
+	return wts
 }
 
 func (m model) tableHeight() int {
@@ -2784,33 +3306,73 @@ func (m model) renderHeader() string {
 	return m.renderColumns("#", "NAME", "STATUS", "BRANCH", "PROJECT", "MSGS", "TOKENS", "MODIFIED", false)
 }
 
-func (m model) renderRow(num int, s claude.SessionInfo) string {
+func (m model) renderRow(num int, s claude.SessionInfo, indent int) string {
 	tokStr := ""
 	if s.TotalTokens() > 0 {
 		tokStr = fmtTokens(s.TotalTokens())
 	}
-	// Override status with pane status for managed windows.
-	status := s.Status.String()
-	if mw, ok := m.managedWindows[s.SessionID]; ok {
-		status = mw.paneStatus.String()
-	}
+	status := m.effectiveStatus(s)
 	dim := s.Status == claude.StatusArchived && status == "archived"
-	row := m.renderColumns(
+
+	// Indent nested rows (session under worktree gets extra padding on the
+	// name column so the hierarchy reads visually).
+	name := s.DisplayName()
+	if indent > 0 {
+		name = strings.Repeat("  ", indent) + name
+	}
+
+	// In hierarchical project view (indent=2), the branch and project columns
+	// are redundant — the enclosing worktree row shows the branch and the
+	// project header shows the project. Blank them out; renderColumns will
+	// still allocate zero width for hidden columns because that decision is
+	// made globally per render pass in branchColWidth().
+	branch := s.GitBranch
+	proj := projectName(s.ProjectPath)
+	if indent >= 2 {
+		branch = ""
+		proj = ""
+	}
+
+	return m.renderColumns(
 		fmt.Sprintf("%d", num),
-		s.DisplayName(),
+		name,
 		status,
-		s.GitBranch,
-		projectName(s.ProjectPath),
+		branch,
+		proj,
 		fmt.Sprintf("%d", s.MessageCount),
 		tokStr,
 		fmtModified(s.Modified),
 		dim,
 	)
-	return row
 }
 
-func (m model) showBranchCol() bool {
-	return m.showWorktrees && cfg.Worktrees != "off"
+// branchColWidth returns the width of the BRANCH column, or 0 to hide it.
+//
+// The column disappears entirely in the hierarchical project view — the
+// worktree rows carry branch info there and a dedicated column would be pure
+// redundancy. It also disappears when the worktree feature is off. Otherwise
+// (flat / status grouping) it sizes to the widest branch name currently
+// visible, clamped to [8, 20] so it never starves NAME or wastes space.
+func (m model) branchColWidth() int {
+	if cfg.Worktrees != "on" || m.groupBy == groupProject {
+		return 0
+	}
+	max := 0
+	for _, s := range m.filtered() {
+		if n := len(s.GitBranch); n > max {
+			max = n
+		}
+	}
+	if max == 0 {
+		return 0
+	}
+	if max < 8 {
+		max = 8
+	}
+	if max > 20 {
+		max = 20
+	}
+	return max
 }
 
 func (m model) renderColumns(num, name, status, branch, project, msgs, tokens, modified string, dim bool) string {
@@ -2822,12 +3384,11 @@ func (m model) renderColumns(num, name, status, branch, project, msgs, tokens, m
 	if m.showTokens {
 		tokW = 8
 	}
-	branchW := 0
-	if m.showBranchCol() {
-		branchW = 14
-	}
+	branchW := m.branchColWidth()
 	projW := 0
-	if tw >= 90 {
+	// Project column is redundant inside project-grouped view — the header
+	// already carries the project name.
+	if tw >= 90 && m.groupBy != groupProject {
 		projW = 18
 	}
 	numW := 3
@@ -2864,6 +3425,8 @@ func (m model) renderColumns(num, name, status, branch, project, msgs, tokens, m
 			statusCell = stProcessing.Render(statusCell)
 		case "done":
 			statusCell = stDone.Render(statusCell)
+		case "unknown":
+			statusCell = stUnknown.Render(statusCell)
 		}
 	}
 
@@ -2984,15 +3547,6 @@ func formatDashboardUsage(sessions []claude.SessionInfo) string {
 			parts = append(parts, fmtTokens(total))
 		}
 	}
-	if usageHas("cost") {
-		var total float64
-		for _, s := range sessions {
-			total += estimateCost(s)
-		}
-		if total > 0 {
-			parts = append(parts, fmt.Sprintf("~$%.2f", total))
-		}
-	}
 	if apiPercent != "" {
 		if resetStr != "" {
 			apiPercent += " " + resetStr
@@ -3003,11 +3557,61 @@ func formatDashboardUsage(sessions []claude.SessionInfo) string {
 }
 
 // formatUsage builds the usage string for the tmux status bar based on config.
+// paneStatusFromState reads the per-session state file written by Claude
+// Code hooks and maps it to a tmux.PaneStatus. Returns PaneUnknown when the
+// file is missing — typically because hooks aren't installed yet or the
+// session started before the install.
+func paneStatusFromState(sessionID string) tmux.PaneStatus {
+	info, err := sessionstate.Read(sessionID)
+	return paneStatusFromInfo(info, err)
+}
+
+// paneStatusFromInfo maps a sessionstate Info value (and the error from
+// reading it) into a tmux.PaneStatus. Saves the caller a second Read when
+// the Info has already been loaded for other purposes.
+func paneStatusFromInfo(info sessionstate.Info, err error) tmux.PaneStatus {
+	if err != nil {
+		return tmux.PaneUnknown
+	}
+	switch info.State {
+	case sessionstate.StateProcessing:
+		return tmux.PaneProcessing
+	case sessionstate.StateWaiting:
+		return tmux.PaneWaiting
+	case sessionstate.StateDone:
+		return tmux.PaneDone
+	}
+	return tmux.PaneUnknown
+}
+
+
 func formatUsage(s claude.SessionInfo) string {
+	return formatUsageInternal(s.InputTokens, s.OutputTokens, claude.GetLastModel(s.SessionID), s)
+}
+
+// formatUsageFromState renders the per-window usage string using hook-pushed
+// token counts and model from the sessionstate. Falls back to JSONL-derived
+// values when the state file is missing pieces (e.g. an old session whose
+// hooks ran on a prior c9s install).
+func formatUsageFromState(s claude.SessionInfo, info sessionstate.Info) string {
+	inTok, outTok := info.InputTokens, info.OutputTokens
+	if inTok == 0 && outTok == 0 {
+		inTok, outTok = s.InputTokens, s.OutputTokens
+	}
+	model := info.Model
+	if model == "" {
+		model = claude.GetLastModel(s.SessionID)
+	}
+	return formatUsageInternal(inTok, outTok, model, s)
+}
+
+// formatUsageInternal is the shared formatter used by per-window and dashboard
+// status-bar renderers.
+func formatUsageInternal(inTok, outTok int, model string, _ claude.SessionInfo) string {
 	if cfg.StatusUsage == "off" {
 		return ""
 	}
-	budgetTokens := s.InputTokens + s.OutputTokens
+	budgetTokens := inTok + outTok
 	if budgetTokens == 0 {
 		return ""
 	}
@@ -3030,19 +3634,14 @@ func formatUsage(s claude.SessionInfo) string {
 	if usageHas("tokens") {
 		parts = append(parts, fmtTokens(budgetTokens))
 	}
-	if usageHas("cost") {
-		parts = append(parts, fmt.Sprintf("~$%.2f", estimateCost(s)))
-	}
 	if apiPercent != "" {
 		if resetStr != "" {
 			apiPercent += " " + resetStr
 		}
 		parts = append(parts, apiPercent)
 	}
-	if cfg.StatusModel == "on" {
-		if lm := claude.GetLastModel(s.SessionID); lm != "" {
-			parts = append(parts, shortModelName(lm))
-		}
+	if cfg.StatusModel == "on" && model != "" {
+		parts = append(parts, shortModelName(model))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -3068,14 +3667,6 @@ func fmtResetTime(resetsAt string) string {
 	return fmt.Sprintf("resets %dm", m)
 }
 
-// estimateCost returns the estimated API-equivalent cost for a session.
-// cost = (input + cache_write) * cost_input/M + output * cost_output/M + cache_read * cost_cache/M
-func estimateCost(s claude.SessionInfo) float64 {
-	inputCost := float64(s.InputTokens+s.CacheCreate) / 1_000_000 * cfg.CostInput
-	outputCost := float64(s.OutputTokens) / 1_000_000 * cfg.CostOutput
-	cacheCost := float64(s.CacheRead) / 1_000_000 * cfg.CostCache
-	return inputCost + outputCost + cacheCost
-}
 
 func navKeys() tmux.NavKeys {
 	return tmux.NavKeys{
@@ -3124,6 +3715,31 @@ func statusColors() tmux.StatusColors {
 }
 
 func main() {
+	// Handle non-TUI subcommands before anything else so they don't load the
+	// TUI, don't bootstrap tmux, and don't depend on a terminal being
+	// attached. The `_hook` handler is invoked by Claude Code with JSON on
+	// stdin and must exit quickly.
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "install":
+			os.Exit(runInstall())
+		case "uninstall":
+			os.Exit(runUninstall())
+		case "_hook":
+			event := ""
+			if len(os.Args) >= 3 {
+				event = os.Args[2]
+			}
+			os.Exit(runHook(event))
+		case "_cycle":
+			direction := ""
+			if len(os.Args) >= 3 {
+				direction = os.Args[2]
+			}
+			os.Exit(runCycle(direction))
+		}
+	}
+
 	// Handle --version early before loading config.
 	for _, arg := range os.Args[1:] {
 		if arg == "--version" || arg == "-v" {
@@ -3138,6 +3754,7 @@ func main() {
 	insideTmux := false
 	demoMode := false
 	debugMode := false
+	forceNewSession := false
 	args := os.Args[1:]
 
 	// Parse flags from args (remove internal flags, keep user-facing ones for forwarding).
@@ -3152,6 +3769,10 @@ func main() {
 		case "--debug":
 			debugMode = true
 			filtered = append(filtered, arg) // forward through tmux bootstrap
+		case "--new":
+			// Force a fresh tmux session even if an idle c9s* one is reusable.
+			// Not forwarded — the child is already inside its chosen session.
+			forceNewSession = true
 		default:
 			filtered = append(filtered, arg)
 		}
@@ -3167,10 +3788,15 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		if tmux.SessionExists() {
+		// Pick the tmux session name for this terminal. A terminal whose
+		// previous c9s detached (keep_alive) reuses that idle session;
+		// otherwise (or with --new), we get the lowest free "c9s-<N>" name.
+		sessionName := tmux.PickSessionName(forceNewSession)
+		tmux.SetCurrentSession(sessionName)
+		if tmux.SessionExists(sessionName) {
 			// Session already exists. Re-create dashboard window if it was
 			// closed (e.g., after keep_alive detach killed the bubbletea process).
-			if !tmux.WindowExists(tmux.SessionName + ":" + tmux.DashboardWindow) {
+			if !tmux.WindowExists(sessionName + ":" + tmux.DashboardWindow) {
 				tmux.CreateDashboardWindow(selfBin, args)
 				tmux.ConfigureStatusBar(navKeys(), statusColors(), version, cfg.ScrollSpeed, cfg.RefreshSeconds)
 				tmux.SetupNavigationKeys(navKeys())
@@ -3188,6 +3814,10 @@ func main() {
 		return // Bootstrap exec's, so this is only reached if attach was used.
 	}
 
+	// Resolve our tmux session name from the live tmux server now that we're
+	// inside the child process. Side effect: sets tmux.SessionName so every
+	// subsequent tmux call targets the right c9s instance (c9s / c9s-2 / …).
+	inC9s := tmux.InC9sSession()
 	var sessions []claude.SessionInfo
 	var loadErr error
 	if demoMode {
@@ -3195,7 +3825,7 @@ func main() {
 	} else {
 		sessions, loadErr = claude.ListAllSessions()
 	}
-	m := initialModel(sessions, loadErr, insideTmux || tmux.InC9sSession())
+	m := initialModel(sessions, loadErr, insideTmux || inC9s)
 	m.demoMode = demoMode
 	// On startup, scan existing tmux windows and recover or clean up orphans
 	// from previous c9s runs (e.g. after keep_alive detach or a crash).
@@ -3203,9 +3833,8 @@ func main() {
 		m.reconcileStartupWindows(sessions)
 	}
 	if demoMode {
-		m.showTokens = false    // start clean, toggle on during demo
-		m.showWorktrees = false // start clean, toggle on during demo
-		cfg.Worktrees = "always"
+		m.showTokens = false // start clean, toggle on during demo
+		cfg.Worktrees = "on"
 		// Simulate managed windows with pane statuses for some sessions.
 		for _, s := range sessions {
 			switch s.DemoPaneStatus {

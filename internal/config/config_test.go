@@ -74,70 +74,86 @@ func TestEditableFields(t *testing.T) {
 		t.Errorf("field[3].Key = %q, want keep_alive", fields[3].Key)
 	}
 
-	// Fifth is status usage (General section).
-	if fields[4].Key != "status_usage" {
-		t.Errorf("field[4].Key = %q, want status_usage", fields[4].Key)
+	// Fifth is hide archived (General section).
+	if fields[4].Key != "hide_archived" {
+		t.Errorf("field[4].Key = %q, want hide_archived", fields[4].Key)
 	}
-	if len(fields[4].Options) != 7 {
-		t.Errorf("status_usage Options = %v, want 7 options", fields[4].Options)
-	}
-
-	// Sixth is status model (General section).
-	if fields[5].Key != "status_model" {
-		t.Errorf("field[5].Key = %q, want status_model", fields[5].Key)
-	}
-	if len(fields[5].Options) != 2 {
-		t.Errorf("status_model Options = %v, want 2 options", fields[5].Options)
+	if len(fields[4].Options) != 2 {
+		t.Errorf("hide_archived Options = %v, want 2 options", fields[4].Options)
 	}
 
-	// 7-9 are cost estimation fields (Cost estimation section).
-	for i, key := range []string{"cost_input", "cost_output", "cost_cache"} {
-		if fields[i+6].Key != key {
-			t.Errorf("field[%d].Key = %q, want %q", i+6, fields[i+6].Key, key)
+	// Sixth is status usage (General section).
+	if fields[5].Key != "status_usage" {
+		t.Errorf("field[5].Key = %q, want status_usage", fields[5].Key)
+	}
+	if len(fields[5].Options) != 4 {
+		t.Errorf("status_usage Options = %v, want 4 options", fields[5].Options)
+	}
+
+	// Seventh is status model (General section).
+	if fields[6].Key != "status_model" {
+		t.Errorf("field[6].Key = %q, want status_model", fields[6].Key)
+	}
+	if len(fields[6].Options) != 2 {
+		t.Errorf("status_model Options = %v, want 2 options", fields[6].Options)
+	}
+
+	// Eighth is desktop notifications (General section).
+	if fields[7].Key != "notifications" {
+		t.Errorf("field[7].Key = %q, want notifications", fields[7].Key)
+	}
+	if len(fields[7].Options) != 2 {
+		t.Errorf("notifications Options = %v, want 2 options", fields[7].Options)
+	}
+
+	// 9-14 are phone notification fields (Phone notifications section).
+	for i, key := range []string{"notify_push", "notify_push_url", "notify_push_topic", "notify_push_token", "notify_push_user", "notify_push_pass"} {
+		if fields[i+8].Key != key {
+			t.Errorf("field[%d].Key = %q, want %q", i+8, fields[i+8].Key, key)
 		}
-		if fields[i+6].Section != "Cost estimation" {
-			t.Errorf("field[%d].Section = %q, want Cost estimation", i+6, fields[i+6].Section)
+		if fields[i+8].Section != "Phone notifications" {
+			t.Errorf("field[%d].Section = %q, want Phone notifications", i+8, fields[i+8].Section)
 		}
 	}
 
-	// 10-11 are usage history fields.
-	if fields[9].Key != "usage_history" {
-		t.Errorf("field[9].Key = %q, want usage_history", fields[9].Key)
+	// 15-16 are usage history fields.
+	if fields[14].Key != "usage_history" {
+		t.Errorf("field[14].Key = %q, want usage_history", fields[14].Key)
 	}
-	if fields[9].Section != "Usage history" {
-		t.Errorf("field[9].Section = %q, want Usage history", fields[9].Section)
+	if fields[14].Section != "Usage history" {
+		t.Errorf("field[14].Section = %q, want Usage history", fields[14].Section)
 	}
-	if fields[10].Key != "reset_history" {
-		t.Errorf("field[10].Key = %q, want reset_history", fields[10].Key)
+	if fields[15].Key != "reset_history" {
+		t.Errorf("field[15].Key = %q, want reset_history", fields[15].Key)
 	}
-	if !fields[10].Action {
+	if !fields[15].Action {
 		t.Error("reset_history should be an Action field")
 	}
 
-	// 12th and 13th are worktree fields (Worktrees section).
-	if fields[11].Key != "worktrees" {
-		t.Errorf("field[11].Key = %q, want worktrees", fields[11].Key)
+	// 17 is the single worktree field (Worktrees section).
+	if fields[16].Key != "worktrees" {
+		t.Errorf("field[16].Key = %q, want worktrees", fields[16].Key)
 	}
-	if fields[11].Section != "Worktrees (beta)" {
-		t.Errorf("field[11].Section = %q, want Worktrees (beta)", fields[11].Section)
+	if fields[16].Section != "Worktrees" {
+		t.Errorf("field[16].Section = %q, want Worktrees", fields[16].Section)
 	}
-	if fields[12].Key != "worktree_expand" {
-		t.Errorf("field[12].Key = %q, want worktree_expand", fields[12].Key)
+	if len(fields[16].Options) != 2 {
+		t.Errorf("worktrees Options = %v, want 2 options (off/on)", fields[16].Options)
 	}
 
 	// Next 3 should be shortcuts.
 	for i, key := range []string{"dashboard", "next_session", "prev_session"} {
-		if fields[i+13].Key != key {
-			t.Errorf("field[%d].Key = %q, want %q", i+13, fields[i+13].Key, key)
+		if fields[i+17].Key != key {
+			t.Errorf("field[%d].Key = %q, want %q", i+17, fields[i+17].Key, key)
 		}
-		if fields[i+13].Section != "Shortcuts" {
-			t.Errorf("field[%d].Section = %q, want Shortcuts", i+13, fields[i+13].Section)
+		if fields[i+17].Section != "Shortcuts" {
+			t.Errorf("field[%d].Section = %q, want Shortcuts", i+17, fields[i+17].Section)
 		}
 	}
 
-	// 17th should be theme toggle.
-	if fields[16].Key != "theme" {
-		t.Errorf("field[16].Key = %q, want theme", fields[16].Key)
+	// Theme toggle follows shortcuts.
+	if fields[20].Key != "theme" {
+		t.Errorf("field[20].Key = %q, want theme", fields[20].Key)
 	}
 
 	// Test Get/Set roundtrip on refresh field.
@@ -167,34 +183,31 @@ func TestWorktreeConfigFields(t *testing.T) {
 	if cfg.Worktrees != "off" {
 		t.Errorf("default Worktrees = %q, want off", cfg.Worktrees)
 	}
-	if cfg.WorktreeExpand != "all" {
-		t.Errorf("default WorktreeExpand = %q, want all", cfg.WorktreeExpand)
-	}
 
 	// Test worktrees field validation via EditableFields.
 	fields := EditableFields()
-	var wtField, wtExpandField Field
+	var wtField Field
 	for _, f := range fields {
 		if f.Key == "worktrees" {
 			wtField = f
 		}
-		if f.Key == "worktree_expand" {
-			wtExpandField = f
-		}
 	}
 
 	// Valid values.
-	wtField.Set(&cfg, "auto")
-	if cfg.Worktrees != "auto" {
-		t.Errorf("Set worktrees auto: got %q", cfg.Worktrees)
-	}
-	wtField.Set(&cfg, "always")
-	if cfg.Worktrees != "always" {
-		t.Errorf("Set worktrees always: got %q", cfg.Worktrees)
+	wtField.Set(&cfg, "on")
+	if cfg.Worktrees != "on" {
+		t.Errorf("Set worktrees on: got %q", cfg.Worktrees)
 	}
 	wtField.Set(&cfg, "off")
 	if cfg.Worktrees != "off" {
 		t.Errorf("Set worktrees off: got %q", cfg.Worktrees)
+	}
+
+	// Legacy values (auto/always) are no longer accepted via the editor;
+	// load-time migration handles them. See TestLoadMigratesLegacyWorktrees.
+	wtField.Set(&cfg, "auto")
+	if cfg.Worktrees != "off" {
+		t.Errorf("auto Set should be ignored after collapse, got %q", cfg.Worktrees)
 	}
 
 	// Invalid value should be ignored.
@@ -202,15 +215,34 @@ func TestWorktreeConfigFields(t *testing.T) {
 	if cfg.Worktrees != "off" {
 		t.Errorf("invalid Set should not change, got %q", cfg.Worktrees)
 	}
+}
 
-	// WorktreeExpand validation.
-	wtExpandField.Set(&cfg, "selected")
-	if cfg.WorktreeExpand != "selected" {
-		t.Errorf("Set expand selected: got %q", cfg.WorktreeExpand)
+func TestLoadMigratesLegacyWorktrees(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	PathOverride = path
+	t.Cleanup(func() { PathOverride = "" })
+
+	// Legacy "auto" → "on".
+	os.WriteFile(path, []byte(`{"worktrees":"auto"}`), 0644)
+	if cfg := Load(); cfg.Worktrees != "on" {
+		t.Errorf("legacy auto: got %q, want on", cfg.Worktrees)
 	}
-	wtExpandField.Set(&cfg, "invalid")
-	if cfg.WorktreeExpand != "selected" {
-		t.Errorf("invalid Set should not change, got %q", cfg.WorktreeExpand)
+
+	// Legacy "always" → "on".
+	os.WriteFile(path, []byte(`{"worktrees":"always"}`), 0644)
+	if cfg := Load(); cfg.Worktrees != "on" {
+		t.Errorf("legacy always: got %q, want on", cfg.Worktrees)
+	}
+
+	// Modern "off"/"on" pass through unchanged.
+	os.WriteFile(path, []byte(`{"worktrees":"off"}`), 0644)
+	if cfg := Load(); cfg.Worktrees != "off" {
+		t.Errorf("off: got %q, want off", cfg.Worktrees)
+	}
+	os.WriteFile(path, []byte(`{"worktrees":"on"}`), 0644)
+	if cfg := Load(); cfg.Worktrees != "on" {
+		t.Errorf("on: got %q, want on", cfg.Worktrees)
 	}
 }
 

@@ -9,13 +9,60 @@ import (
 )
 
 const (
-	SessionName    = "c9s"
 	DashboardWindow = "dashboard"
 )
+
+// SessionName is the tmux session this c9s process is bound to. Defaults to
+// "c9s" — the legacy single-session name — but each terminal that bootstraps
+// a fresh c9s gets its own name ("c9s-2", "c9s-3", …) so two dashboards in
+// two terminals don't mirror each other. Set via SetCurrentSession before
+// any tmux call. The `--inside-tmux` child resolves it from tmux itself via
+// InC9sSession.
+var SessionName = "c9s"
+
+// SetCurrentSession sets the tmux session name this process targets.
+func SetCurrentSession(name string) {
+	if name == "" {
+		return
+	}
+	SessionName = name
+}
+
+// CurrentSession returns the tmux session name this process targets.
+func CurrentSession() string {
+	return SessionName
+}
 
 // DryRun disables all tmux command execution. Used in tests to prevent
 // side effects against a real tmux session.
 var DryRun bool
+
+// listSessionsFn and listClientsFn back ListC9sSessions / SessionHasClient.
+// Tests replace these to exercise PickSessionName without a real tmux server.
+var listSessionsFn = realListSessions
+var listClientsFn = realListClients
+
+func realListSessions() ([]string, error) {
+	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			names = append(names, line)
+		}
+	}
+	return names, nil
+}
+
+func realListClients(name string) (string, error) {
+	out, err := exec.Command("tmux", "list-clients", "-t", name, "-F", "#{client_name}").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
 
 // Available returns true if tmux is installed.
 func Available() bool {
@@ -28,7 +75,9 @@ func InSession() bool {
 	return os.Getenv("TMUX") != ""
 }
 
-// InC9sSession returns true if we're inside the c9s tmux session.
+// InC9sSession returns true if we're inside a c9s tmux session (named "c9s"
+// or "c9s-<N>"). As a side effect it sets SessionName to the detected name
+// so subsequent calls target the right session.
 func InC9sSession() bool {
 	if !InSession() {
 		return false
@@ -37,12 +86,125 @@ func InC9sSession() bool {
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(string(out)) == SessionName
+	name := strings.TrimSpace(string(out))
+	if !isC9sSessionName(name) {
+		return false
+	}
+	SetCurrentSession(name)
+	return true
 }
 
-// SessionExists returns true if the c9s tmux session exists.
-func SessionExists() bool {
-	return exec.Command("tmux", "has-session", "-t", SessionName).Run() == nil
+// SessionExists returns true if a tmux session with the given name exists.
+// With no arguments it checks the current SessionName, preserving the
+// pre-multi-instance call shape.
+func SessionExists(name ...string) bool {
+	n := SessionName
+	if len(name) > 0 && name[0] != "" {
+		n = name[0]
+	}
+	return exec.Command("tmux", "has-session", "-t", n).Run() == nil
+}
+
+// ListC9sSessions returns the names of every "c9s" / "c9s-<N>" tmux session
+// the local server knows about, in stable (numeric) order: "c9s" first, then
+// "c9s-2", "c9s-3", …
+func ListC9sSessions() []string {
+	names, err := listSessionsFn()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, n := range names {
+		if isC9sSessionName(n) {
+			out = append(out, n)
+		}
+	}
+	sortC9sNames(out)
+	return out
+}
+
+// SessionHasClient reports whether any tmux client is currently attached to
+// the given session.
+func SessionHasClient(name string) bool {
+	out, err := listClientsFn(name)
+	if err != nil {
+		return false
+	}
+	return out != ""
+}
+
+// PickSessionName chooses the tmux session name a new c9s process should
+// target.
+//
+//   - If force is true, always return the lowest free c9s* name (fresh session).
+//   - Otherwise, if a c9s* session exists with no attached client, return that
+//     (so re-running c9s after a detach reattaches).
+//   - Otherwise, return the lowest free c9s* name.
+//
+// Pure logic over ListC9sSessions / SessionHasClient — see those for the
+// underlying tmux calls.
+func PickSessionName(force bool) string {
+	existing := ListC9sSessions()
+	if !force {
+		for _, n := range existing {
+			if !SessionHasClient(n) {
+				return n
+			}
+		}
+	}
+	taken := make(map[string]bool, len(existing))
+	for _, n := range existing {
+		taken[n] = true
+	}
+	if !taken["c9s"] {
+		return "c9s"
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("c9s-%d", i)
+		if !taken[candidate] {
+			return candidate
+		}
+	}
+}
+
+// isC9sSessionName matches the bare "c9s" name and "c9s-<N>" variants.
+func isC9sSessionName(name string) bool {
+	if name == "c9s" {
+		return true
+	}
+	if !strings.HasPrefix(name, "c9s-") {
+		return false
+	}
+	suffix := name[len("c9s-"):]
+	if suffix == "" {
+		return false
+	}
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// sortC9sNames sorts c9s session names with "c9s" first, then by numeric
+// suffix ascending.
+func sortC9sNames(names []string) {
+	idx := func(s string) int {
+		if s == "c9s" {
+			return 1
+		}
+		n, err := strconv.Atoi(s[len("c9s-"):])
+		if err != nil {
+			return 1 << 30
+		}
+		return n
+	}
+	for i := 1; i < len(names); i++ {
+		for j := i; j > 0 && idx(names[j]) < idx(names[j-1]); j-- {
+			names[j], names[j-1] = names[j-1], names[j]
+		}
+	}
 }
 
 // Bootstrap creates the c9s tmux session and attaches to it, re-executing
@@ -86,23 +248,20 @@ func Attach() error {
 }
 
 // NewWindow creates a new tmux window in the c9s session with the given
-// name and command. When the command exits, the window auto-returns to
-// the dashboard. Returns the window ID.
+// name and command. The command is launched directly (via `sh -c` to honor
+// env-var prefixes like `ANTHROPIC_MODEL=...`) — no wrapping shell adds
+// hints or trailing tmux calls. When the command exits the window closes,
+// and the `pane-exited` session hook installed by SetupNavigationKeys
+// selects the dashboard. Returns the window ID.
 func NewWindow(name, shellCmd, workDir string) (string, error) {
 	if DryRun {
 		return "@dry", nil
 	}
-	// Wrap command: run claude, then switch back to dashboard when it exits.
-	wrapped := fmt.Sprintf(
-		`echo "Press Ctrl+b then b to return to dashboard"; %s; tmux select-window -t %s:%s 2>/dev/null`,
-		shellCmd, SessionName, DashboardWindow,
-	)
-
 	args := []string{"new-window", "-a", "-t", SessionName, "-n", name, "-P", "-F", "#{window_id}"}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
-	args = append(args, "sh", "-c", wrapped)
+	args = append(args, "sh", "-c", shellCmd)
 	out, err := exec.Command("tmux", args...).Output()
 	if err != nil {
 		detail := ""
@@ -205,12 +364,16 @@ type WindowInfo struct {
 }
 
 // PaneStatus represents the state of a claude session inside a tmux pane.
+// Values are sourced from per-session state files written by Claude Code
+// hooks (see internal/sessionstate). A managed window with no state file
+// shows as PaneUnknown until the hooks are installed via `c9s install`.
 type PaneStatus int
 
 const (
 	PaneProcessing PaneStatus = iota // claude is generating output
 	PaneWaiting                      // claude is waiting for user input
-	PaneDone                         // claude process has exited
+	PaneDone                         // claude has finished a turn
+	PaneUnknown                      // no state file for this session
 )
 
 func (s PaneStatus) String() string {
@@ -219,8 +382,10 @@ func (s PaneStatus) String() string {
 		return "waiting"
 	case PaneProcessing:
 		return "processing"
-	default:
+	case PaneDone:
 		return "done"
+	default:
+		return "unknown"
 	}
 }
 
@@ -241,85 +406,6 @@ func GetPanePID(windowID string) (int, error) {
 		return 0, fmt.Errorf("no pane pid for window %s", windowID)
 	}
 	return pid, nil
-}
-
-// CapturePaneTail captures the last N lines of the pane in the given window.
-func CapturePaneTail(windowID string, lines int) (string, error) {
-	out, err := exec.Command("tmux", "capture-pane",
-		"-t", windowID,
-		"-p",
-		"-S", fmt.Sprintf("-%d", lines),
-	).Output()
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
-}
-
-// IsAtMainPrompt checks whether the Claude Code pane is showing the main
-// input prompt (❯ between ─── box lines). This means Claude has finished
-// its task and is ready for a new message — i.e., "done".
-//
-// When Claude needs user input (tool approval, questions), it shows a
-// different UI (buttons, [Y/n], etc.) — NOT the main ❯ prompt.
-func IsAtMainPrompt(windowID string) bool {
-	content, err := CapturePaneTail(windowID, 10)
-	if err != nil {
-		return false
-	}
-	return classifyPrompt(content)
-}
-
-// classifyPrompt returns true if the pane content shows the main ❯ prompt
-// (between ─── box-drawing lines), meaning Claude is done and idle.
-func classifyPrompt(content string) bool {
-	lines := strings.Split(content, "\n")
-
-	// Walk from bottom up, looking for ❯ between ─── lines.
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line == "" {
-			continue
-		}
-
-		// The main prompt is: ───\n❯\n───\n-- INSERT --
-		// Check for ❯ with a ─── line above it.
-		if strings.HasPrefix(line, "❯") {
-			// Check if there's a box line above.
-			for j := i - 1; j >= 0 && j >= i-2; j-- {
-				prev := strings.TrimSpace(lines[j])
-				if prev != "" {
-					return isBoxLine(prev)
-				}
-			}
-			return false
-		}
-
-		// Skip -- INSERT -- / -- NORMAL -- and ─── lines.
-		if strings.HasPrefix(line, "-- INSERT --") || strings.HasPrefix(line, "-- NORMAL --") {
-			continue
-		}
-		if isBoxLine(line) {
-			continue
-		}
-
-		// Any other content at the bottom means it's NOT at the main prompt.
-		return false
-	}
-	return false
-}
-
-// isBoxLine returns true if the line consists entirely of box-drawing horizontal chars.
-func isBoxLine(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if r != '─' && r != '━' {
-			return false
-		}
-	}
-	return true
 }
 
 // NavKeys holds the configurable tmux keybindings.
@@ -422,10 +508,13 @@ func ConfigureStatusBar(keys NavKeys, colors StatusColors, version string, scrol
 		exec.Command("tmux", buildArgs("copy-mode", "WheelDownPane", "scroll-down")...).Run()
 	}
 
-	// Enable extended keys so modifiers like Ctrl+Enter pass through
-	// correctly to applications (e.g., Claude Code uses Ctrl+Enter for newline).
-	// "always" sends CSI u sequences even if the app doesn't request them.
-	t("extended-keys", "always")
+	// Enable extended keys *on demand*: tmux waits for the inner app to
+	// request CSI u / kitty kbd protocol before sending extended encodings.
+	// Claude Code requests them itself when it wants Ctrl+Enter for newline,
+	// so "on" preserves that. The previous value "always" forced CSI u for
+	// every key, which broke plain Esc inside Claude Code's /agents prompt
+	// — `\x1b` arrived as `\x1b[27u` and the input parser ignored it.
+	t("extended-keys", "on")
 	// Allow applications to request extended key mode via CSI u sequences.
 	t("allow-passthrough", "on")
 
@@ -435,12 +524,14 @@ func ConfigureStatusBar(keys NavKeys, colors StatusColors, version string, scrol
 	t("default-terminal", "tmux-256color")
 	t("history-limit", "250000")
 
-	// Enable synchronized output (DEC mode 2026) if tmux supports it.
-	// This eliminates flickering when Claude Code sends sync sequences.
-	if SupportsSyncOutput() {
-		exec.Command("tmux", "set-option", "-t", SessionName,
-			"-a", "terminal-features", "xterm*:sync").Run()
-	}
+	// Synchronized output (DEC mode 2026) used to be advertised here as a
+	// tmux terminal-feature so Claude Code would emit sync begin/end
+	// sequences. In practice the interaction between Claude's modern redraw
+	// pattern, tmux next-3.7's sync handling, and iTerm2 produced cursor-
+	// position drift that left overlapping text in the pane. Modern tmux
+	// already handles sync correctly without the hint, so we no longer set
+	// it. If a future tmux/terminal combo regresses, surface this as an
+	// opt-in setting rather than a default.
 
 	// Use status-format to take full control — no default window list.
 	t("status-style", fmt.Sprintf("bg=%s,fg=%s", colors.Bg, colors.Fg))
@@ -461,8 +552,10 @@ func ConfigureStatusBar(keys NavKeys, colors StatusColors, version string, scrol
 	nextPrev := keyDisplayName(keys.NextSession) + "/" + keyDisplayName(keys.PrevSession)[len("ctrl+"):]
 	dash := keyDisplayName(keys.Dashboard)
 	// On dashboard: show usage + version right-aligned.
-	// On session windows: show usage + nav hints right-aligned.
-	// #{@c9s-usage} is set per-window by the tick handler with token/cost info.
+	// On session windows: show usage + nav hints right-aligned. The
+	// processing/waiting/done state badge lives only in the dashboard
+	// table — keeping it out of the tmux bar reduces visual noise inside
+	// claude windows. #{@c9s-usage} is set per-window by the tick handler.
 	usageFmt := fmt.Sprintf("#{?#{@c9s-usage},#[fg=%s]#{@c9s-usage}  ,}", colors.Fg)
 	t("status-format[0]",
 		fmt.Sprintf("#[fg=%s,bold] c9s #[fg=%s]│ #[fg=%s]#W ", colors.Accent, colors.Dim, colors.Fg)+
@@ -474,9 +567,22 @@ func ConfigureStatusBar(keys NavKeys, colors StatusColors, version string, scrol
 
 // SetupNavigationKeys binds configurable keys for the c9s session (root table, no prefix).
 // All bindings use if-shell to only activate inside the c9s session;
-// in other sessions the keys pass through normally.
+// in other sessions the keys pass through normally. Also installs a
+// `pane-exited` session hook that returns to the dashboard when any
+// non-dashboard window exits — the fallback for auto-return when Claude
+// Code hooks aren't installed.
 func SetupNavigationKeys(keys NavKeys) error {
-	sessionCheck := fmt.Sprintf("#{==:#{session_name},%s}", SessionName)
+	// Match both the bare "c9s" session and any "c9s-<N>" instance so
+	// navigation bindings work in every concurrent c9s dashboard.
+	sessionCheck := "#{||:#{==:#{session_name},c9s},#{m:c9s-*,#{session_name}}}"
+
+	// pane-exited: when a session window's pane dies (claude exits, shell
+	// exits, etc.), jump back to the dashboard. Guarded so the dashboard's
+	// own exit doesn't loop. Scoped to the c9s session via `-t SessionName`.
+	exec.Command("tmux", "set-hook", "-t", SessionName, "pane-exited",
+		fmt.Sprintf("if-shell -F '#{!=:#W,%s}' 'select-window -t %s:%s'",
+			DashboardWindow, SessionName, DashboardWindow),
+	).Run()
 
 	// Dashboard key → back to dashboard
 	if err := exec.Command("tmux", "bind-key",
@@ -488,11 +594,28 @@ func SetupNavigationKeys(keys NavKeys) error {
 		return err
 	}
 
-	// Next session key → next window, skip dashboard
+	// Next/Prev session keys dispatch into `c9s _cycle next|prev`, which
+	// orders windows by hook-fed state priority (waiting > processing >
+	// done > unknown) and jumps with wrap-around. Falls back to tmux index
+	// order when no state files exist, preserving the legacy behavior.
+	//
+	// When `os.Executable` fails (e.g. PATH issues in exotic setups), fall
+	// back to the plain next-window / previous-window bindings.
+	bin, binErr := os.Executable()
+
 	nextCmd := fmt.Sprintf(
 		"next-window ; if-shell -F '#{==:#W,%s}' next-window ; refresh-client",
 		DashboardWindow,
 	)
+	prevCmd := fmt.Sprintf(
+		"previous-window ; if-shell -F '#{==:#W,%s}' previous-window ; refresh-client",
+		DashboardWindow,
+	)
+	if binErr == nil {
+		nextCmd = fmt.Sprintf("run-shell -b %q", bin+" _cycle next")
+		prevCmd = fmt.Sprintf("run-shell -b %q", bin+" _cycle prev")
+	}
+
 	if err := exec.Command("tmux", "bind-key",
 		"-n", keys.NextSession,
 		"if-shell", "-F", sessionCheck,
@@ -502,11 +625,6 @@ func SetupNavigationKeys(keys NavKeys) error {
 		return err
 	}
 
-	// Previous session key → previous window, skip dashboard
-	prevCmd := fmt.Sprintf(
-		"previous-window ; if-shell -F '#{==:#W,%s}' previous-window ; refresh-client",
-		DashboardWindow,
-	)
 	return exec.Command("tmux", "bind-key",
 		"-n", keys.PrevSession,
 		"if-shell", "-F", sessionCheck,
@@ -515,11 +633,12 @@ func SetupNavigationKeys(keys NavKeys) error {
 	).Run()
 }
 
-// CleanupNavigationKeys removes the c9s key bindings.
+// CleanupNavigationKeys removes the c9s key bindings and session hooks.
 func CleanupNavigationKeys(keys NavKeys) error {
 	exec.Command("tmux", "unbind-key", "-n", keys.Dashboard).Run()
 	exec.Command("tmux", "unbind-key", "-n", keys.NextSession).Run()
 	exec.Command("tmux", "unbind-key", "-n", keys.PrevSession).Run()
+	exec.Command("tmux", "set-hook", "-u", "-t", SessionName, "pane-exited").Run()
 	return nil
 }
 

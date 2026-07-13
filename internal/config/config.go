@@ -12,31 +12,34 @@ import (
 
 // Config holds all user-configurable settings.
 type Config struct {
-	Theme          string `json:"theme"`            // "default" or "custom"
-	RefreshSeconds int    `json:"refresh_seconds"`  // dashboard refresh interval (default: 3)
-	ScrollSpeed    int    `json:"scroll_speed"`     // lines per mouse scroll event (default: 3)
-	WorkDir        string `json:"work_dir"`         // default working directory for new sessions (empty = cwd)
-	KeepAlive      string `json:"keep_alive"`       // "off" (default) or "on" — keep sessions running on quit
-	StatusUsage    string  `json:"status_usage"`     // "off", "percent" (default), "cost,percent", "all", etc.
-	StatusModel    string  `json:"status_model"`     // "on" (default) or "off" — show model name in status bar
-	CostInput      float64 `json:"cost_input"`      // $/M input+cache_write tokens (default: 3.0 = Sonnet)
-	CostOutput     float64 `json:"cost_output"`     // $/M output tokens (default: 15.0 = Sonnet)
-	CostCache      float64 `json:"cost_cache"`      // $/M cache read tokens (default: 0.30 = Sonnet)
-	UsageHistory   string  `json:"usage_history"`   // "on" (default) or "off" — record API usage over time
-	Worktrees      string  `json:"worktrees"`       // "off" (default), "auto", "always"
-	WorktreeExpand string `json:"worktree_expand"`  // "all" (default), "selected"
-	Keys           Keys   `json:"keys"`
-	Colors         Colors `json:"colors"`
-	Dashboard      Dashboard `json:"dashboard"`     // persisted dashboard state
+	Theme           string    `json:"theme"`             // "default" or "custom"
+	RefreshSeconds  int       `json:"refresh_seconds"`   // dashboard refresh interval (default: 3)
+	ScrollSpeed     int       `json:"scroll_speed"`      // lines per mouse scroll event (default: 3)
+	WorkDir         string    `json:"work_dir"`          // default working directory for new sessions (empty = cwd)
+	KeepAlive       string    `json:"keep_alive"`        // "off" (default) or "on" — keep sessions running on quit
+	HideArchived    string    `json:"hide_archived"`     // "off" (default) or "on" — omit archived sessions from the dashboard
+	StatusUsage     string    `json:"status_usage"`      // "off", "percent" (default), "tokens", "all"
+	StatusModel     string    `json:"status_model"`      // "on" (default) or "off" — show model name in status bar
+	UsageHistory    string    `json:"usage_history"`     // "on" (default) or "off" — record API usage over time
+	Notifications   string    `json:"notifications"`     // "on" (default) or "off" — desktop alerts on claude Notification hooks
+	NotifyPush      string    `json:"notify_push"`       // "off" (default) or "ntfy" — also push to a smartphone
+	NotifyPushURL   string    `json:"notify_push_url"`   // ntfy base URL (default https://ntfy.sh)
+	NotifyPushTopic string    `json:"notify_push_topic"` // ntfy topic name (treat as a secret)
+	NotifyPushToken string    `json:"notify_push_token"` // optional bearer token for protected ntfy topics
+	NotifyPushUser  string    `json:"notify_push_user"`  // optional basic-auth username (self-hosted ntfy)
+	NotifyPushPass  string    `json:"notify_push_pass"`  // optional basic-auth password (self-hosted ntfy)
+	Worktrees       string    `json:"worktrees"`         // "off" (default) or "on" — show worktree sub-rows and add/delete keys
+	Keys            Keys      `json:"keys"`
+	Colors          Colors    `json:"colors"`
+	Dashboard       Dashboard `json:"dashboard"` // persisted dashboard state
 }
 
 // Dashboard persists the last-used dashboard toggle states.
 type Dashboard struct {
 	ShowTokens       bool     `json:"show_tokens"`
 	ShowPreview      bool     `json:"show_preview"`
-	ShowWorktrees    bool     `json:"show_worktrees"`
-	GroupBy          int      `json:"group_by"`           // 0=none, 1=project, 2=status
-	ReplacedSessions []string `json:"replaced_sessions"`  // sessions hidden after fork/clear
+	GroupBy          int      `json:"group_by"`          // 0=none, 1=project, 2=status
+	ReplacedSessions []string `json:"replaced_sessions"` // sessions hidden after fork/clear
 }
 
 // Keys defines tmux-level navigation keybindings.
@@ -91,14 +94,14 @@ func Default() Config {
 		RefreshSeconds: 3,
 		ScrollSpeed:    3,
 		KeepAlive:      "off",
+		HideArchived:   "off",
 		StatusUsage:    "percent",
 		StatusModel:    "on",
-		CostInput:      3.0,
-		CostOutput:     15.0,
-		CostCache:      0.30,
 		UsageHistory:   "on",
+		Notifications:  "on",
+		NotifyPush:     "off",
+		NotifyPushURL:  "https://ntfy.sh",
 		Worktrees:      "off",
-		WorktreeExpand: "all",
 		Keys: Keys{
 			Dashboard:   "C-d",
 			NextSession: "C-n",
@@ -193,9 +196,18 @@ func EditableFields() []Field {
 					c.KeepAlive = v
 				}
 			}},
+		{Section: "General", Label: "Hide archived", Key: "hide_archived",
+			Desc:    "on: omit archived sessions from the dashboard (only resumable/active/idle are shown)",
+			Options: []string{"off", "on"},
+			Get:     func(c Config) string { return c.HideArchived },
+			Set: func(c *Config, v string) {
+				if v == "off" || v == "on" {
+					c.HideArchived = v
+				}
+			}},
 		{Section: "General", Label: "Status bar usage", Key: "status_usage",
-			Desc:    "What to show in tmux status bar. Comma-separated: tokens, cost, percent, or all",
-			Options: []string{"off", "percent", "cost", "cost,percent", "tokens", "tokens,cost", "all"},
+			Desc:    "What to show in tmux status bar. Comma-separated: tokens or percent (or both: tokens,percent)",
+			Options: []string{"off", "percent", "tokens", "tokens,percent"},
 			Get:     func(c Config) string { return c.StatusUsage },
 			Set: func(c *Config, v string) {
 				c.StatusUsage = v
@@ -209,31 +221,44 @@ func EditableFields() []Field {
 					c.StatusModel = v
 				}
 			}},
-		// Cost estimation
-		{Section: "Cost estimation", Label: "$/M input", Key: "cost_input",
-			Desc:    "$/M for input + cache write tokens. Sonnet: 3, Opus: 15, Haiku: 0.25",
-			Get:     func(c Config) string { return strconv.FormatFloat(c.CostInput, 'f', -1, 64) },
+		{Section: "General", Label: "Desktop notifications", Key: "notifications",
+			Desc:    "Send a system notification when a session needs attention (Notification hook)",
+			Options: []string{"on", "off"},
+			Get:     func(c Config) string { return c.Notifications },
 			Set: func(c *Config, v string) {
-				if n, err := strconv.ParseFloat(v, 64); err == nil && n >= 0 {
-					c.CostInput = n
+				if v == "on" || v == "off" {
+					c.Notifications = v
 				}
 			}},
-		{Section: "Cost estimation", Label: "$/M output", Key: "cost_output",
-			Desc:    "$/M for output tokens. Sonnet: 15, Opus: 75, Haiku: 1.25",
-			Get:     func(c Config) string { return strconv.FormatFloat(c.CostOutput, 'f', -1, 64) },
+		{Section: "Phone notifications", Label: "Provider", Key: "notify_push",
+			Desc:    "ntfy: also push attention alerts to the ntfy iOS/Android app. off: desktop only.",
+			Options: []string{"off", "ntfy"},
+			Get:     func(c Config) string { return c.NotifyPush },
 			Set: func(c *Config, v string) {
-				if n, err := strconv.ParseFloat(v, 64); err == nil && n >= 0 {
-					c.CostOutput = n
+				if v == "off" || v == "ntfy" {
+					c.NotifyPush = v
 				}
 			}},
-		{Section: "Cost estimation", Label: "$/M cache", Key: "cost_cache",
-			Desc:    "$/M for cache read tokens. Sonnet: 0.30, Opus: 1.50, Haiku: 0.025",
-			Get:     func(c Config) string { return strconv.FormatFloat(c.CostCache, 'f', -1, 64) },
-			Set: func(c *Config, v string) {
-				if n, err := strconv.ParseFloat(v, 64); err == nil && n >= 0 {
-					c.CostCache = n
-				}
-			}},
+		{Section: "Phone notifications", Label: "ntfy base URL", Key: "notify_push_url",
+			Desc: "Base URL of the ntfy server. Default https://ntfy.sh; change only if you self-host.",
+			Get:  func(c Config) string { return c.NotifyPushURL },
+			Set:  func(c *Config, v string) { c.NotifyPushURL = v }},
+		{Section: "Phone notifications", Label: "ntfy topic", Key: "notify_push_topic",
+			Desc: "Topic name to subscribe to in the ntfy app. Treat it as a secret — anyone who knows it can send you alerts.",
+			Get:  func(c Config) string { return c.NotifyPushTopic },
+			Set:  func(c *Config, v string) { c.NotifyPushTopic = v }},
+		{Section: "Phone notifications", Label: "ntfy auth token", Key: "notify_push_token",
+			Desc: "Optional bearer token for protected ntfy topics. Takes precedence over username/password.",
+			Get:  func(c Config) string { return c.NotifyPushToken },
+			Set:  func(c *Config, v string) { c.NotifyPushToken = v }},
+		{Section: "Phone notifications", Label: "ntfy username", Key: "notify_push_user",
+			Desc: "Optional basic-auth username (for self-hosted ntfy with per-user ACLs). Ignored when an auth token is set.",
+			Get:  func(c Config) string { return c.NotifyPushUser },
+			Set:  func(c *Config, v string) { c.NotifyPushUser = v }},
+		{Section: "Phone notifications", Label: "ntfy password", Key: "notify_push_pass",
+			Desc: "Optional basic-auth password. Stored in plain text in the config file — only use on a trusted local machine.",
+			Get:  func(c Config) string { return c.NotifyPushPass },
+			Set:  func(c *Config, v string) { c.NotifyPushPass = v }},
 		// Usage history
 		{Section: "Usage history", Label: "Recording", Key: "usage_history",
 			Desc:    "Record API usage to ~/.c9s/usage-history.jsonl every 5 minutes",
@@ -249,23 +274,14 @@ func EditableFields() []Field {
 			Action: true,
 			Get:    func(c Config) string { return "" },
 			Set:    func(c *Config, v string) {}},
-		// Worktrees (beta)
-		{Section: "Worktrees (beta)", Label: "Mode", Key: "worktrees",
-			Desc:    "off: disabled, auto: show if worktrees exist, always: always show",
-			Options: []string{"off", "auto", "always"},
+		// Worktrees
+		{Section: "Worktrees", Label: "Mode", Key: "worktrees",
+			Desc:    "on: show a branch column + per-project worktree sub-rows and enable the a/d add/delete keys; off: disabled",
+			Options: []string{"off", "on"},
 			Get:     func(c Config) string { return c.Worktrees },
 			Set: func(c *Config, v string) {
-				if v == "off" || v == "auto" || v == "always" {
+				if v == "off" || v == "on" {
 					c.Worktrees = v
-				}
-			}},
-		{Section: "Worktrees (beta)", Label: "Expand", Key: "worktree_expand",
-			Desc:    "all: toggle all worktrees at once, selected: expand per session",
-			Options: []string{"all", "selected"},
-			Get:     func(c Config) string { return c.WorktreeExpand },
-			Set: func(c *Config, v string) {
-				if v == "all" || v == "selected" {
-					c.WorktreeExpand = v
 				}
 			}},
 		// Shortcuts
@@ -397,6 +413,11 @@ func Load() Config {
 		return cfg
 	}
 	json.Unmarshal(data, &cfg)
+	// Migrate legacy worktree modes: pre-0.0.3 had off/auto/always; current
+	// schema is off/on. Both former on-modes collapse to "on".
+	if cfg.Worktrees == "auto" || cfg.Worktrees == "always" {
+		cfg.Worktrees = "on"
+	}
 	return cfg
 }
 

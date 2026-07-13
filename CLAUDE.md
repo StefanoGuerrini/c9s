@@ -125,16 +125,19 @@ q on dashboard   → kills entire c9s tmux session
 |-----|--------|
 | `j/k` or `↑/↓` | Navigate |
 | `Enter` | Open/resume selected session |
-| `n` | New claude session (in selected project dir) |
+| `n` / `N` | New claude session (`N` chains into the effort picker) |
 | `x` | Close managed tmux window |
 | `R` | Rename session (writes to sessions-index.json) |
+| `b` | Backup the selected session JSONL |
 | `/` | Search sessions |
 | `Esc` | Clear search filter |
 | `Tab` | Cycle grouping: none → project → status |
 | `p` | Toggle session preview panel |
 | `t` | Toggle token column |
-| `w` | Toggle worktree sub-rows + branch column (when worktrees enabled) |
-| `r` | Cycle refresh interval (1s/2s/3s/5s) |
+| `w` | Toggle worktrees for the selected project (when `worktrees: on`) |
+| `a` | Add a worktree on the selected project (prompts for branch name) |
+| `d` | Delete the worktree under the cursor (confirms, force-prompts if dirty) |
+| `c` | Open config screen |
 | `u` | Usage history screen |
 | `q` / `Ctrl+c` | Quit |
 | `Ctrl+n/p` | Next/previous session window (from claude window) |
