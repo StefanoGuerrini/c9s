@@ -161,29 +161,57 @@ func decodeProjectDir(encodedDir string) string {
 	return "/" + strings.ReplaceAll(base[1:], "-", "/")
 }
 
-// jsonlIndex caches the result of buildJSONLIndex, invalidated by the mtime
-// of ~/.claude/projects/. A new session dir bumps that mtime, so we re-scan
-// on any real change but skip the walk on hot ticks.
+// jsonlIndex caches the result of buildJSONLIndex, invalidated by a fingerprint
+// of ~/.claude/projects/ that includes each project subdir's mtime. We can't
+// rely on the projects/ dir mtime alone: creating a JSONL inside an existing
+// subdir only bumps that subdir's mtime, not the parent's, so a "new session
+// in a project I've used before" would be missed until c9s restarted.
 var (
 	jsonlIndexCache struct {
-		mtime time.Time
-		index map[string]string
+		fingerprint string
+		index       map[string]string
 	}
 )
 
+// projectsFingerprint returns a short string that changes whenever any project
+// subdir is added, removed, or has its contents modified. Computed by stat'ing
+// each immediate subdir of projects/ (which itself is cheap — a few hundred
+// stats at most) and folding name + mtime together. This is the invalidation
+// signal buildJSONLIndex uses so newly-created JSONLs are picked up on the
+// very next tick.
+func projectsFingerprint(root string) string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		fi, err := os.Stat(filepath.Join(root, e.Name()))
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&b, "%s:%d|", e.Name(), fi.ModTime().UnixNano())
+	}
+	return b.String()
+}
+
 // buildJSONLIndex scans every subdir of ~/.claude/projects/ and maps each
-// session-id to the absolute path of its JSONL file. Result is cached by the
-// mtime of the projects directory so repeated ListAllSessions calls don't
-// re-walk. Session-ids collide across projects only when the same session was
-// checked in twice (impossible in practice); if it happens, the last-seen
-// wins, which is harmless.
+// session-id to the absolute path of its JSONL file. Result is cached; the
+// cache is invalidated when the project-subdirs fingerprint changes (either a
+// new subdir appears, or an existing subdir has a new JSONL). Session-ids
+// collide across projects only when the same session was checked in twice
+// (impossible in practice); if it happens, the last-seen wins, which is
+// harmless.
 func buildJSONLIndex() map[string]string {
 	root := filepath.Join(claudeDir(), "projects")
-	fi, err := os.Stat(root)
-	if err != nil {
+	if _, err := os.Stat(root); err != nil {
 		return map[string]string{}
 	}
-	if jsonlIndexCache.index != nil && fi.ModTime().Equal(jsonlIndexCache.mtime) {
+	fp := projectsFingerprint(root)
+	if jsonlIndexCache.index != nil && jsonlIndexCache.fingerprint == fp {
 		return jsonlIndexCache.index
 	}
 	index := make(map[string]string, 512)
@@ -209,7 +237,7 @@ func buildJSONLIndex() map[string]string {
 			index[id] = filepath.Join(sub, name)
 		}
 	}
-	jsonlIndexCache.mtime = fi.ModTime()
+	jsonlIndexCache.fingerprint = fp
 	jsonlIndexCache.index = index
 	return index
 }

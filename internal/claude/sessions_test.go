@@ -199,6 +199,50 @@ func TestListAllSessionsWorktreeJSONL(t *testing.T) {
 	}
 }
 
+// TestBuildJSONLIndexNoticesNewFileInExistingSubdir guards against a subtle
+// caching bug: when a user starts a new Claude session inside a project they
+// have used before, the new JSONL file appears under an existing project
+// subdir. The parent projects/ directory's mtime does NOT bump on macOS/
+// APFS or Linux/ext4 when only nested files change, so a cache keyed by
+// projects/ mtime alone would return a stale index and the new session
+// would look "archived" until c9s restarted. buildJSONLIndex must include
+// each subdir's mtime in its fingerprint so the second call after a new
+// nested file returns an updated index.
+func TestBuildJSONLIndexNoticesNewFileInExistingSubdir(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	jsonlIndexCache.index = nil
+	jsonlIndexCache.fingerprint = ""
+
+	proj := filepath.Join(tmpHome, ".claude", "projects", "-Users-test-proj")
+	os.MkdirAll(proj, 0755)
+	os.WriteFile(filepath.Join(proj, "old.jsonl"), []byte("x"), 0644)
+
+	// First call primes the cache with old.jsonl only.
+	first := buildJSONLIndex()
+	if _, ok := first["old"]; !ok {
+		t.Fatalf("first call: expected 'old' in index, got %+v", first)
+	}
+	if _, ok := first["fresh"]; ok {
+		t.Fatalf("first call: 'fresh' should not exist yet")
+	}
+
+	// A new session gets written inside the existing subdir. The projects/
+	// dir mtime doesn't change, but the subdir's mtime does. Bump it
+	// explicitly so the test is deterministic across filesystems that batch
+	// mtime updates.
+	os.WriteFile(filepath.Join(proj, "fresh.jsonl"), []byte("y"), 0644)
+	later := time.Now().Add(1 * time.Second)
+	if err := os.Chtimes(proj, later, later); err != nil {
+		t.Fatal(err)
+	}
+
+	second := buildJSONLIndex()
+	if _, ok := second["fresh"]; !ok {
+		t.Errorf("second call: expected 'fresh' in index after nested write, got %+v", second)
+	}
+}
+
 func TestListAllSessionsEmptyHistory(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
