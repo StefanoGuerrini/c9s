@@ -118,10 +118,10 @@ type clearStatusMsg struct{}
 // displayItem is one row of the dashboard table. Rows come in four flavors,
 // selected by exactly one of the bool flags:
 //
-//   - isHeader        — group header (── auto-parser (2 sessions) ──)
-//   - isWorktreeRow   — a worktree row inside a project group
-//   - isEmptyWorktree — a worktree with no sessions (dim placeholder)
-//   - (none set)      — a session row
+//   - isHeader        -- group header (── auto-parser (2 sessions) ──)
+//   - isWorktreeRow   -- a worktree row inside a project group
+//   - isEmptyWorktree -- a worktree with no sessions (dim placeholder)
+//   - (none set)      -- a session row
 //
 // indent carries the visual nesting level so the renderer can prepend the
 // right amount of whitespace: 0 for headers, 1 for worktree rows and for
@@ -209,7 +209,7 @@ type model struct {
 	collapsedWorktrees map[string]bool               // worktree path → collapsed
 	worktreeCache      map[string]worktreeCacheEntry // project dir → cached worktrees + mtime fingerprint
 
-	// Worktree create prompt (a key) — reuses renameInput.
+	// Worktree create prompt (a key) -- reuses renameInput.
 	addingWorktree    bool
 	addWorktreeRepo   string // repo dir for the worktree being created
 
@@ -312,6 +312,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// If superseded detection ran first it would kill the active window
 			// before reconcile could re-key it to the new session ID.
 			if m.insideTmux && len(m.managedWindows) > 0 {
+				// Pane-anchor pass first: hooks record $TMUX_PANE, so if
+				// Claude switched session ids inside a pane the state file
+				// is the authoritative signal. This corrects the tag before
+				// mtime-based heuristics run.
+				m.retagFromPaneAnchors()
 				prevReplaced := len(m.replacedSessions)
 				m.reconcileWindows(m.sessions)
 				if len(m.replacedSessions) > prevReplaced {
@@ -373,7 +378,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			// Refresh tmux per-window usage badge. Prefer hook-pushed state
-			// (input/output tokens, model) when available — that avoids
+			// (input/output tokens, model) when available -- that avoids
 			// reopening the session JSONL every tick. Fall back to the
 			// JSONL-derived SessionInfo for sessions started before hooks
 			// were installed.
@@ -494,7 +499,7 @@ func (m model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		if m.insideTmux {
 			if cfg.KeepAlive == "on" {
-				// Just detach — dashboard and all sessions keep running.
+				// Just detach -- dashboard and all sessions keep running.
 				// Re-running c9s will re-attach to the existing session.
 				tmux.Detach()
 				return m, nil // don't quit, keep dashboard alive
@@ -561,12 +566,12 @@ func (m model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.toggleWorktree(items)
 	case "a":
 		if !m.worktreesActive() {
-			return m, statusCmd("worktrees show up when grouped by project — press Tab", false)
+			return m, statusCmd("worktrees show up when grouped by project -- press Tab", false)
 		}
 		return m.startAddWorktree(items)
 	case "d":
 		if !m.worktreesActive() {
-			return m, statusCmd("worktrees show up when grouped by project — press Tab", false)
+			return m, statusCmd("worktrees show up when grouped by project -- press Tab", false)
 		}
 		return m.startDeleteWorktree(items)
 	case "enter":
@@ -604,7 +609,7 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if !m.insideTmux {
-		return m, statusCmd("tmux required — run c9s outside tmux to auto-bootstrap", true)
+		return m, statusCmd("tmux required -- run c9s outside tmux to auto-bootstrap", true)
 	}
 
 	// If a worktree row (populated or empty placeholder) is selected, start a
@@ -630,7 +635,7 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 			debugLog("openSession → switched to existing window %s", mw.windowID)
 			return m, nil
 		}
-		// Window was closed externally — clean up and fall through to re-open.
+		// Window was closed externally -- clean up and fall through to re-open.
 		debugLog("openSession → window %s gone, cleaning up", mw.windowID)
 		delete(m.managedWindows, s.SessionID)
 	}
@@ -638,7 +643,7 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 	// Check for superseded/forked sessions to prevent duplicate windows.
 	superseded := claude.GetSupersededSessions()
 
-	// Case 1: This session was superseded — switch to the successor's window.
+	// Case 1: This session was superseded -- switch to the successor's window.
 	if superseded[s.SessionID] {
 		debugLog("openSession → session is superseded, looking for successor window")
 		for _, mw := range m.managedWindows {
@@ -698,7 +703,7 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		// No backup — start a new session in the same project directory.
+		// No backup -- start a new session in the same project directory.
 		claudeCmd = "claude"
 	}
 
@@ -732,14 +737,14 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 // placeholder so the dashboard has *something* to read for the window while we
 // wait for the first hook to land. Without it, sessions resumed before any
 // hook event ever fires (or whose state file was deleted) sit at "unknown"
-// forever. Errors are swallowed on purpose — this is best-effort book-keeping,
+// forever. Errors are swallowed on purpose -- this is best-effort book-keeping,
 // not a correctness path.
 func seedSessionState(sessionID, workDir string) {
 	if sessionID == "" {
 		return
 	}
 	if _, err := sessionstate.Read(sessionID); err == nil {
-		return // file exists — hooks own it now
+		return // file exists -- hooks own it now
 	}
 	_ = sessionstate.Patch(sessionID, func(i *sessionstate.Info) {
 		if i.State == "" {
@@ -757,18 +762,25 @@ func (m model) newSession(items []displayItem, effort, modelID string) (tea.Mode
 	debugLog("newSession effort=%q model=%q effortWorkDir=%q pickingProject=%v pickingEffort=%v",
 		effort, modelID, m.effortWorkDir, m.pickingProject, m.pickingEffort)
 	if !m.insideTmux {
-		return m, statusCmd("tmux required — run c9s outside tmux to auto-bootstrap", true)
+		return m, statusCmd("tmux required -- run c9s outside tmux to auto-bootstrap", true)
 	}
 
 	// Use the selected session's project dir, configured work_dir, or cwd.
 	// Priority: effortWorkDir (worktree) > work_dir config > selected session's project.
+	// Prefer the repo's main worktree over a linked worktree, so `n` from a
+	// row inside a feature worktree still creates the new session in main.
+	// Enter on a worktree row bypasses this via effortWorkDir.
 	workDir := m.effortWorkDir
 	if workDir == "" && cfg.WorkDir != "" {
 		workDir = cfg.WorkDir
 	}
 	if workDir == "" {
 		if s := m.selectedSession(items); s != nil && s.ProjectPath != "" {
-			workDir = s.ProjectPath
+			if main := m.mainWorktreeDir(s.ProjectPath); main != "" {
+				workDir = main
+			} else {
+				workDir = s.ProjectPath
+			}
 		}
 	}
 	if workDir == "" {
@@ -804,12 +816,16 @@ func (m model) newSession(items []displayItem, effort, modelID string) (tea.Mode
 // startEffortPicker enters effort selection mode before creating a new session.
 func (m model) startEffortPicker(items []displayItem) (tea.Model, tea.Cmd) {
 	if !m.insideTmux {
-		return m, statusCmd("tmux required — run c9s outside tmux to auto-bootstrap", true)
+		return m, statusCmd("tmux required -- run c9s outside tmux to auto-bootstrap", true)
 	}
 	workDir := cfg.WorkDir
 	if workDir == "" {
 		if s := m.selectedSession(items); s != nil && s.ProjectPath != "" {
-			workDir = s.ProjectPath
+			if main := m.mainWorktreeDir(s.ProjectPath); main != "" {
+				workDir = main
+			} else {
+				workDir = s.ProjectPath
+			}
 		}
 	}
 	if workDir == "" {
@@ -1032,7 +1048,7 @@ func (m model) overlayProjectPicker(base string) string {
 	if m.projectModelStep {
 		// Model selection step.
 		projName := filepath.Base(m.effortWorkDir)
-		title := fmt.Sprintf(" %s · %s — model ", projName, m.projectEffort)
+		title := fmt.Sprintf(" %s · %s -- model ", projName, m.projectEffort)
 		barW := boxW - 2 - len([]rune(title))
 		if barW < 0 {
 			barW = 0
@@ -1057,7 +1073,7 @@ func (m model) overlayProjectPicker(base string) string {
 	} else if m.projectEffortStep {
 		// Effort selection step.
 		projName := filepath.Base(m.effortWorkDir)
-		title := " " + projName + " — effort "
+		title := " " + projName + " -- effort "
 		barW := boxW - 2 - len([]rune(title))
 		if barW < 0 {
 			barW = 0
@@ -1298,7 +1314,7 @@ func (m *model) reconcileWindows(sessions []claude.SessionInfo) {
 		// Determine if this is a fork, clear, or compaction.
 		// Fork: old session file still on disk AND new session has content.
 		// Clear: old session file still on disk AND new session is blank.
-		// Compaction: old session file gone (archived) — same as clear.
+		// Compaction: old session file gone (archived) -- same as clear.
 		oldOnDisk := false
 		if oldSession, ok := sessionByID[mw.sessionID]; ok {
 			oldOnDisk = oldSession.Status != claude.StatusArchived
@@ -1351,8 +1367,16 @@ func (m *model) reconcileWindows(sessions []claude.SessionInfo) {
 // reconcileStartupWindows scans existing tmux windows and re-populates
 // managedWindows for windows that were opened by a previous c9s run.
 // This prevents duplicate windows when the user re-opens a session after restart.
-// Windows are NOT killed here — the normal tick handler (reconcileWindows +
+// Windows are NOT killed here -- the normal tick handler (reconcileWindows +
 // GetSupersededSessions) handles cleanup once sessions are confirmed stale.
+//
+// Two adoption signals, in priority order:
+//  1. Pane anchor -- a state file recorded $TMUX_PANE at its last hook fire.
+//     This is authoritative even when the session id has drifted from the
+//     static @session-id tag (e.g. after /resume or --session-id inside the
+//     pane).
+//  2. @session-id tag -- the id c9s wrote when it created the window. Used
+//     when hooks haven't fired yet for that pane.
 func (m *model) reconcileStartupWindows(sessions []claude.SessionInfo) {
 	if !m.insideTmux {
 		return
@@ -1365,27 +1389,141 @@ func (m *model) reconcileStartupWindows(sessions []claude.SessionInfo) {
 	for i := range sessions {
 		sessionByID[sessions[i].SessionID] = &sessions[i]
 	}
+	paneSession := sessionstate.PaneSessionMap()
 	for _, w := range windows {
-		if w.Name == tmux.DashboardWindow || w.SessionID == "" {
+		if w.Name == tmux.DashboardWindow {
 			continue
 		}
-		// Re-populate managedWindows for tagged windows whose session is still known.
-		if s, ok := sessionByID[w.SessionID]; ok {
-			if _, alreadyTracked := m.managedWindows[w.SessionID]; !alreadyTracked {
-				debugLog("startup → recovered window %s name=%q session=%q project=%q", w.ID, w.Name, w.SessionID, s.ProjectPath)
-				m.managedWindows[w.SessionID] = managedWindow{
-					windowID:  w.ID,
-					sessionID: w.SessionID,
-					project:   s.ProjectPath,
-				}
-				seedSessionState(w.SessionID, s.ProjectPath)
-			}
-		} else {
-			debugLog("startup → orphan window %s name=%q session=%q (not in session list)", w.ID, w.Name, w.SessionID)
+		sid := paneSession[w.PaneID]
+		fromPane := sid != ""
+		if sid == "" {
+			sid = w.SessionID
 		}
-		// Windows for unknown/superseded sessions are left alone here.
-		// The first tick will detect them via GetSupersededSessions and close them.
+		if sid == "" {
+			continue
+		}
+		s, ok := sessionByID[sid]
+		if !ok {
+			debugLog("startup → orphan window %s name=%q session=%q (not in session list)", w.ID, w.Name, sid)
+			continue
+		}
+		if _, alreadyTracked := m.managedWindows[sid]; alreadyTracked {
+			continue
+		}
+		debugLog("startup → recovered window %s name=%q session=%q project=%q (fromPane=%v)",
+			w.ID, w.Name, sid, s.ProjectPath, fromPane)
+		m.managedWindows[sid] = managedWindow{
+			windowID:  w.ID,
+			sessionID: sid,
+			project:   s.ProjectPath,
+		}
+		// Re-align the tmux tag if the pane anchor disagreed with it. Cheap
+		// idempotent write when they already match.
+		if w.SessionID != sid {
+			tmux.SetWindowEnv(w.ID, "session-id", sid)
+		}
+		seedSessionState(sid, s.ProjectPath)
 	}
+}
+
+// retagFromPaneAnchors uses the tmux pane id recorded by Claude Code hooks to
+// realign managed windows with the session id they're actually running right
+// now. This is the only signal that survives a session-id change from inside
+// the pane (/resume, /clear, compact, --session-id) -- the static @session-id
+// tag we set at window creation goes stale in those cases.
+//
+// Returns true when at least one window was retagged.
+func (m *model) retagFromPaneAnchors() bool {
+	if !m.insideTmux || len(m.managedWindows) == 0 {
+		return false
+	}
+	windows, err := tmux.ListWindows()
+	if err != nil {
+		return false
+	}
+	return m.applyPaneAnchorRetag(windows, sessionstate.PaneSessionMap())
+}
+
+// applyPaneAnchorRetag is the pure logic behind retagFromPaneAnchors, split
+// out for testability. Two things happen here:
+//
+//  1. Retag drifted windows -- a managed window whose active pane anchors to a
+//     session id different from its map key is rebound to the pane's id.
+//  2. Adopt orphan windows -- a tmux window whose pane anchors to a known
+//     session id but that isn't in managedWindows yet gets added (this covers
+//     the `n`-born, tag-less window whose Claude switched sessions via
+//     /resume before c9s could see the change).
+//
+// Returns true when anything changed.
+func (m *model) applyPaneAnchorRetag(windows []tmux.WindowInfo, paneSession map[string]string) bool {
+	if len(paneSession) == 0 {
+		return false
+	}
+	windowReal := make(map[string]string, len(windows))
+	windowProject := make(map[string]string, len(windows))
+	for _, w := range windows {
+		if w.PaneID == "" || w.Name == tmux.DashboardWindow {
+			continue
+		}
+		if realID := paneSession[w.PaneID]; realID != "" {
+			windowReal[w.ID] = realID
+			windowProject[w.ID] = "" // project resolved from managed entry when available
+		}
+	}
+	changed := false
+	// Pass 1: retag drifted managed windows.
+	for key, mw := range m.managedWindows {
+		realID, ok := windowReal[mw.windowID]
+		if !ok {
+			continue
+		}
+		windowProject[mw.windowID] = mw.project // remember for pass-2 adoption
+		if realID == key {
+			continue
+		}
+		debugLog("retag → window %s: %q → %q (pane anchor)", mw.windowID, key, realID)
+		// If another entry already claims realID with a different window,
+		// the pane anchor is authoritative -- drop the impostor so we don't
+		// leave two entries for the same id. Its window will be retagged
+		// in this pass or the next when its own pane emits a hook.
+		if prev, exists := m.managedWindows[realID]; exists && prev.windowID != mw.windowID {
+			debugLog("retag → dropping stale entry %q → window %s", realID, prev.windowID)
+			delete(m.managedWindows, realID)
+		}
+		delete(m.managedWindows, key)
+		m.managedWindows[realID] = managedWindow{
+			windowID:   mw.windowID,
+			sessionID:  realID,
+			project:    mw.project,
+			paneStatus: mw.paneStatus,
+		}
+		tmux.SetWindowEnv(mw.windowID, "session-id", realID)
+		changed = true
+	}
+	// Pass 2: adopt orphan windows whose pane anchors to a session not
+	// already tracked. This picks up untagged `n`-born windows where Claude
+	// switched sessions from inside the pane before c9s could observe it.
+	tracked := make(map[string]string, len(m.managedWindows)) // windowID → key
+	for key, mw := range m.managedWindows {
+		tracked[mw.windowID] = key
+	}
+	for wid, realID := range windowReal {
+		if _, alreadyManaged := m.managedWindows[realID]; alreadyManaged {
+			continue
+		}
+		if _, thisWindowAlreadyTracked := tracked[wid]; thisWindowAlreadyTracked {
+			continue
+		}
+		debugLog("adopt → window %s → session %q (pane anchor)", wid, realID)
+		m.managedWindows[realID] = managedWindow{
+			windowID:  wid,
+			sessionID: realID,
+			project:   windowProject[wid],
+		}
+		tmux.SetWindowEnv(wid, "session-id", realID)
+		changed = true
+	}
+	return changed
 }
 
 // saveDashboardState persists toggle states to config so they survive restarts.
@@ -1548,7 +1686,7 @@ func (m model) usageView() string {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(statusColors().Accent))
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColors().Dim))
 
-	b.WriteString(titleStyle.Render(" c9s — usage history"))
+	b.WriteString(titleStyle.Render(" c9s -- usage history"))
 	padding := m.width - 21 - len(modeLabel) - len(rangeLabel) - 1
 	if padding > 0 {
 		b.WriteString(strings.Repeat(" ", padding))
@@ -1563,7 +1701,7 @@ func (m model) usageView() string {
 		// Aggregate data points into rows.
 		rows := m.aggregateUsageRows(points)
 
-		// Header — built the same way as data rows so bar-char widths match.
+		// Header -- built the same way as data rows so bar-char widths match.
 		hdr := "  " + fmt.Sprintf("%-14s", "Date") +
 			fmt.Sprintf("%-12s", "5h peak") + fmt.Sprintf("%-8s", "") +
 			fmt.Sprintf("%-12s", "7d last") + fmt.Sprintf("%-8s", "") +
@@ -1589,7 +1727,7 @@ func (m model) usageView() string {
 			if r.tokens > 0 {
 				b.WriteString(fmt.Sprintf("%8s", fmtTokens(r.tokens)))
 			} else {
-				b.WriteString(dimStyle.Render("       —"))
+				b.WriteString(dimStyle.Render("       --"))
 			}
 			if len(r.models) > 0 {
 				b.WriteString("    ")
@@ -1992,7 +2130,7 @@ func (m *model) adjustConfigScroll(items []configDisplayItem) {
 func (m model) configView() string {
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render(" c9s — config"))
+	b.WriteString(titleStyle.Render(" c9s -- config"))
 	b.WriteString("\n\n")
 
 	items := m.configVisibleItems()
@@ -2218,7 +2356,7 @@ func (m model) updateRename(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 // worktreesActive reports whether the worktree feature has any effect right
-// now — used to gate the w/a/d handlers and to decide what footer hint to
+// now -- used to gate the w/a/d handlers and to decide what footer hint to
 // show. Being "active" requires: feature toggled on AND grouping by project
 // (worktrees are project-scoped and only render inside a project group).
 func (m model) worktreesActive() bool {
@@ -2255,7 +2393,7 @@ func (m model) projectAtCursor(items []displayItem) string {
 // nothing so the user learns where the feature lives.
 func (m model) toggleWorktree(items []displayItem) (tea.Model, tea.Cmd) {
 	if !m.worktreesActive() {
-		return m, statusCmd("worktrees show up when grouped by project — press Tab", false)
+		return m, statusCmd("worktrees show up when grouped by project -- press Tab", false)
 	}
 	if m.cursor < 0 || m.cursor >= len(items) {
 		return m, nil
@@ -2335,7 +2473,7 @@ func (m model) updateAddWorktree(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // startDeleteWorktree triggers the delete confirmation overlay. It works on
 // worktree rows (both populated and empty-placeholder). The main worktree is
-// refused outright — removing it would orphan the repo.
+// refused outright -- removing it would orphan the repo.
 func (m model) startDeleteWorktree(items []displayItem) (tea.Model, tea.Cmd) {
 	if m.cursor < 0 || m.cursor >= len(items) {
 		return m, nil
@@ -2481,9 +2619,9 @@ func (m model) View() tea.View {
 	// Title
 	count := len(m.filtered())
 	total := len(m.sessions)
-	titleText := fmt.Sprintf(" c9s — %d sessions", total)
+	titleText := fmt.Sprintf(" c9s -- %d sessions", total)
 	if count != total {
-		titleText = fmt.Sprintf(" c9s — %d/%d sessions", count, total)
+		titleText = fmt.Sprintf(" c9s -- %d/%d sessions", count, total)
 	}
 	if m.insideTmux && len(m.managedWindows) > 0 {
 		titleText += fmt.Sprintf(" · %d windows", len(m.managedWindows))
@@ -2491,7 +2629,7 @@ func (m model) View() tea.View {
 	b.WriteString(titleStyle.Render(titleText))
 	b.WriteString("\n")
 	if !m.hooksInstalled && len(m.managedWindows) > 0 {
-		b.WriteString(dimStyle.Render(" live status disabled — run `c9s install` to enable hooks"))
+		b.WriteString(dimStyle.Render(" live status disabled -- run `c9s install` to enable hooks"))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
@@ -2546,7 +2684,14 @@ func (m model) View() tea.View {
 			if m.collapsedWorktrees[wt.Path] {
 				glyph = "▸"
 			}
-			label := "  " + glyph + " " + wt.Branch
+			branch := wt.Branch
+			if branch == "" {
+				branch = "(unnamed)"
+			}
+			label := "  " + glyph + " " + branch
+			if wt.IsMain {
+				label += " (main)"
+			}
 			// Status glyphs: ⚠ for dirty (tracked changes), ↑N ahead of
 			// upstream, ↓N behind. Quiet when everything is clean & synced.
 			if wt.Dirty {
@@ -2566,7 +2711,7 @@ func (m model) View() tea.View {
 			continue
 		}
 		if item.isEmptyWorktree {
-			label := "      — no sessions — press Enter to start one here"
+			label := "      -- no sessions -- press Enter to start one here"
 			row := m.renderColumns("", label, "", "", item.worktree.Path, "", "", "", true)
 			if i == m.cursor {
 				row = selectedStyle.Width(tw).Render(row)
@@ -2771,7 +2916,7 @@ func (m model) previewWorktree(it displayItem, items []displayItem, innerW int) 
 	content = append(content, "")
 	content = append(content, previewDim.Render(fmt.Sprintf("Sessions (%d):", len(mine))))
 	if len(mine) == 0 {
-		content = append(content, previewDim.Render("  (none — press Enter to start one)"))
+		content = append(content, previewDim.Render("  (none -- press Enter to start one)"))
 	} else {
 		for _, s := range mine {
 			content = append(content, previewVal.Render("  · "+trunc(s.DisplayName(), innerW-4)))
@@ -2787,7 +2932,7 @@ func (m model) previewWorktree(it displayItem, items []displayItem, innerW int) 
 }
 
 // previewEmptyWorktree is the tighter form used when the cursor lands on the
-// placeholder row of a worktree that has no sessions yet — it's basically the
+// placeholder row of a worktree that has no sessions yet -- it's basically the
 // worktree preview with a nudge to press Enter.
 func (m model) previewEmptyWorktree(it displayItem, items []displayItem, innerW int) []string {
 	return m.previewWorktree(it, items, innerW)
@@ -2905,7 +3050,7 @@ func (m model) footer() string {
 		}
 		prompt := fmt.Sprintf("delete worktree '%s' at %s%s? ", wt.Branch, wt.Path, warn)
 		if m.deleteWorktreeForce {
-			prompt = fmt.Sprintf("worktree '%s' has uncommitted changes — force remove? ", wt.Branch)
+			prompt = fmt.Sprintf("worktree '%s' has uncommitted changes -- force remove? ", wt.Branch)
 		}
 		return helpStyle.Render(prompt +
 			helpKeyStyle.Render("y") + " yes  " +
@@ -2981,7 +3126,7 @@ func (m model) footer() string {
 
 // effectiveStatus returns the status string to display for a session. When
 // the session has a managed tmux window AND the hook-fed pane status is a
-// specific value (processing/waiting/done), that wins — the pane status is
+// specific value (processing/waiting/done), that wins -- the pane status is
 // live and more accurate than the file-mtime lifecycle status. When the
 // pane status is Unknown (hooks not installed, no hook fired yet, or the
 // state file is missing/corrupt), we fall back to the lifecycle status
@@ -3171,7 +3316,7 @@ func (m model) hierarchicalGroup(name, project string, sessions []claude.Session
 	for _, s := range sessions {
 		// A session running inside a worktree records its ProjectPath as the
 		// repo root (that's what Claude writes to history.jsonl), but its
-		// JSONL is stored under the worktree's encoded path — we surface
+		// JSONL is stored under the worktree's encoded path -- we surface
 		// that as Cwd during discovery. Prefer Cwd for worktree bucketing
 		// so worktree-scoped sessions nest under the right row, falling
 		// back to ProjectPath when Cwd wasn't determined.
@@ -3241,7 +3386,7 @@ func plural(n int, singular, plur string) string {
 
 // worktreeCacheEntry stores the list of worktrees for one repo along with a
 // fingerprint of the on-disk state that produced it. The fingerprint is the
-// modtime of .git/worktrees/ and .git/index — both files git touches when
+// modtime of .git/worktrees/ and .git/index -- both files git touches when
 // worktrees come and go or the working tree's HEAD moves. We use this to
 // invalidate the cache when the user runs `git worktree add/remove` in another
 // terminal without forcing a full git call every tick.
@@ -3252,7 +3397,7 @@ type worktreeCacheEntry struct {
 
 // worktreeFingerprint returns a short string identifying the current state of
 // the worktree-relevant files for a repo. Empty when none exist (still a valid
-// fingerprint — a cache hit on "" means "we already looked and there was
+// fingerprint -- a cache hit on "" means "we already looked and there was
 // nothing", so don't shell out again until something changes).
 func worktreeFingerprint(repoDir string) string {
 	var b strings.Builder
@@ -3282,6 +3427,19 @@ func (m model) lookupWorktrees(dir string) []git.Worktree {
 	wts := git.ListWorktrees(dir)
 	m.worktreeCache[dir] = worktreeCacheEntry{worktrees: wts, fingerprint: fp}
 	return wts
+}
+
+// mainWorktreeDir returns the main worktree path for the repo containing dir,
+// or "" if dir is not inside a git repo. Preferred over raw ProjectPath when
+// starting a new session, so `n` lands in main even if the selected row lives
+// in a linked worktree.
+func (m model) mainWorktreeDir(dir string) string {
+	for _, wt := range m.lookupWorktrees(dir) {
+		if wt.IsMain {
+			return wt.Path
+		}
+	}
+	return ""
 }
 
 func (m model) tableHeight() int {
@@ -3322,7 +3480,7 @@ func (m model) renderRow(num int, s claude.SessionInfo, indent int) string {
 	}
 
 	// In hierarchical project view (indent=2), the branch and project columns
-	// are redundant — the enclosing worktree row shows the branch and the
+	// are redundant -- the enclosing worktree row shows the branch and the
 	// project header shows the project. Blank them out; renderColumns will
 	// still allocate zero width for hidden columns because that decision is
 	// made globally per render pass in branchColWidth().
@@ -3348,7 +3506,7 @@ func (m model) renderRow(num int, s claude.SessionInfo, indent int) string {
 
 // branchColWidth returns the width of the BRANCH column, or 0 to hide it.
 //
-// The column disappears entirely in the hierarchical project view — the
+// The column disappears entirely in the hierarchical project view -- the
 // worktree rows carry branch info there and a dedicated column would be pure
 // redundancy. It also disappears when the worktree feature is off. Otherwise
 // (flat / status grouping) it sizes to the widest branch name currently
@@ -3386,7 +3544,7 @@ func (m model) renderColumns(num, name, status, branch, project, msgs, tokens, m
 	}
 	branchW := m.branchColWidth()
 	projW := 0
-	// Project column is redundant inside project-grouped view — the header
+	// Project column is redundant inside project-grouped view -- the header
 	// already carries the project name.
 	if tw >= 90 && m.groupBy != groupProject {
 		projW = 18
@@ -3559,7 +3717,7 @@ func formatDashboardUsage(sessions []claude.SessionInfo) string {
 // formatUsage builds the usage string for the tmux status bar based on config.
 // paneStatusFromState reads the per-session state file written by Claude
 // Code hooks and maps it to a tmux.PaneStatus. Returns PaneUnknown when the
-// file is missing — typically because hooks aren't installed yet or the
+// file is missing -- typically because hooks aren't installed yet or the
 // session started before the install.
 func paneStatusFromState(sessionID string) tmux.PaneStatus {
 	info, err := sessionstate.Read(sessionID)
@@ -3771,7 +3929,7 @@ func main() {
 			filtered = append(filtered, arg) // forward through tmux bootstrap
 		case "--new":
 			// Force a fresh tmux session even if an idle c9s* one is reusable.
-			// Not forwarded — the child is already inside its chosen session.
+			// Not forwarded -- the child is already inside its chosen session.
 			forceNewSession = true
 		default:
 			filtered = append(filtered, arg)

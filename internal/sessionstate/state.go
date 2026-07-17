@@ -62,6 +62,14 @@ type Info struct {
 	// CompactingSoon is set by PreCompact and cleared on the next user
 	// turn. Dashboard surfaces it as a ⚠ compact indicator.
 	CompactingSoon bool `json:"compacting_soon,omitempty"`
+
+	// TmuxPane is the value of $TMUX_PANE at the last hook fire -- the pane id
+	// (e.g. "%23") the session was attached to when the hook ran. This is the
+	// authoritative signal for "which window is running this session id right
+	// now", because it re-anchors even after /resume, /clear, compact, or
+	// --session-id switches inside the pane. Empty when the hook didn't run
+	// under tmux, or when hooks aren't installed.
+	TmuxPane string `json:"tmux_pane,omitempty"`
 }
 
 // DirOverride lets tests redirect state file reads/writes.
@@ -165,6 +173,40 @@ func Patch(sessionID string, fn func(*Info)) error {
 	fn(&cur)
 	cur.UpdatedAt = time.Now().UTC()
 	return write(cur)
+}
+
+// PaneSessionMap returns paneID → sessionID drawn from every state file that
+// records a TmuxPane. When two sessions claim the same pane (e.g. one ended
+// but its file lingers), the freshest UpdatedAt wins -- that's the session
+// currently attached. Empty map if the state dir doesn't exist yet.
+func PaneSessionMap() map[string]string {
+	entries, err := os.ReadDir(dir())
+	if err != nil {
+		return map[string]string{}
+	}
+	type winner struct {
+		sessionID string
+		updatedAt time.Time
+	}
+	best := make(map[string]winner)
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		sid := e.Name()[:len(e.Name())-len(".json")]
+		info, err := Read(sid)
+		if err != nil || info.TmuxPane == "" {
+			continue
+		}
+		if cur, ok := best[info.TmuxPane]; !ok || info.UpdatedAt.After(cur.updatedAt) {
+			best[info.TmuxPane] = winner{sessionID: sid, updatedAt: info.UpdatedAt}
+		}
+	}
+	out := make(map[string]string, len(best))
+	for pane, w := range best {
+		out[pane] = w.sessionID
+	}
+	return out
 }
 
 // Remove deletes the state file for a session. Used by SessionEnd.

@@ -41,7 +41,7 @@ type hookPayload struct {
 	// SessionStart); modelField accepts both.
 	Model modelField `json:"model"`
 
-	// Cost / usage totals — present on Stop and statusLine payloads.
+	// Cost / usage totals -- present on Stop and statusLine payloads.
 	Cost struct {
 		TotalCostUSD float64 `json:"total_cost_usd"`
 	} `json:"cost"`
@@ -143,7 +143,7 @@ func runHook(event string) int {
 		}
 		info.LastEvent = claudeEvent
 
-		// Identity / context — always refreshed when present.
+		// Identity / context -- always refreshed when present.
 		if p.Cwd != "" {
 			info.Cwd = p.Cwd
 		}
@@ -152,6 +152,12 @@ func runHook(event string) int {
 		}
 		if name := modelName(p); name != "" {
 			info.Model = name
+		}
+		// Anchor the session to its tmux pane so the dashboard can retag a
+		// window whose managed session id drifts (from /resume, /clear,
+		// compact, or --session-id changes inside the pane).
+		if pane := os.Getenv("TMUX_PANE"); pane != "" {
+			info.TmuxPane = pane
 		}
 
 		// Per-event enrichment.
@@ -216,7 +222,7 @@ func runHook(event string) int {
 // maybeNotify dispatches a desktop notification iff the user hasn't opted
 // out via `notifications: off` in config, and additionally pushes to the
 // configured smartphone provider (ntfy) when set. Reads config every call
-// (cheap — it's a single JSON file) so the toggles take effect without
+// (cheap -- it's a single JSON file) so the toggles take effect without
 // restarting claude / c9s.
 func maybeNotify(p hookPayload) {
 	cfg := config.Load()
@@ -303,7 +309,7 @@ func friendlyModelName(model string) string {
 	return fmt.Sprintf("%s %s.%s", parts[0], parts[1], parts[2])
 }
 
-// sessionLabel returns a short identifier for the session — preferring the
+// sessionLabel returns a short identifier for the session -- preferring the
 // cwd basename (project name) so the notification has context, falling
 // back to the model name or session id stub.
 func sessionLabel(p hookPayload) string {

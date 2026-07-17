@@ -200,7 +200,7 @@ func TestReconcileWindows_ConcurrentSessionsNotStolen(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Two concurrent sessions in the same project, each tracked by its own window.
-	// Neither should steal the other's window — they're independent.
+	// Neither should steal the other's window -- they're independent.
 	m := &model{
 		replacedSessions: make(map[string]bool),
 		managedWindows: map[string]managedWindow{
@@ -293,6 +293,105 @@ func TestReconcileWindows_SupersededRekeys(t *testing.T) {
 	}
 	if _, ok := m.managedWindows["new-id"]; !ok {
 		t.Error("window should be re-keyed to new-id")
+	}
+}
+
+func TestApplyPaneAnchorRetag_ReassignsToRealSession(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+
+	// The classic bug: window @14 was born from `n` (tmpKey new-*) and Claude
+	// resumed session B inside it via /resume. Another window @12 still
+	// carries the @session-id tag for B from before. Pane anchor points @14
+	// at B; the stale entry on @12 must be dropped so Enter routes to @14.
+	m := &model{
+		managedWindows: map[string]managedWindow{
+			"B": {windowID: "@12", sessionID: "B", project: "/proj"},
+			"new-42": {windowID: "@14", sessionID: "", project: "/proj"},
+		},
+	}
+	windows := []tmux.WindowInfo{
+		{ID: "@14", PaneID: "%14", Name: "auto-parser"},
+		{ID: "@12", PaneID: "%12", Name: "Old"},
+	}
+	paneSession := map[string]string{"%14": "B"}
+
+	if !m.applyPaneAnchorRetag(windows, paneSession) {
+		t.Fatal("expected retag to report a change")
+	}
+	mw, ok := m.managedWindows["B"]
+	if !ok {
+		t.Fatal("session B should still be tracked after retag")
+	}
+	if mw.windowID != "@14" {
+		t.Errorf("B.windowID = %q, want @14 (the pane that hooks anchored)", mw.windowID)
+	}
+	if _, stillNew := m.managedWindows["new-42"]; stillNew {
+		t.Error("new-42 entry should be gone")
+	}
+	if len(m.managedWindows) != 1 {
+		t.Errorf("expected exactly 1 managed window after retag, got %d: %+v", len(m.managedWindows), m.managedWindows)
+	}
+}
+
+func TestApplyPaneAnchorRetag_NoopWhenTagAlreadyMatches(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+	m := &model{
+		managedWindows: map[string]managedWindow{
+			"A": {windowID: "@1", sessionID: "A", project: "/proj"},
+		},
+	}
+	windows := []tmux.WindowInfo{{ID: "@1", PaneID: "%1"}}
+	paneSession := map[string]string{"%1": "A"}
+	if m.applyPaneAnchorRetag(windows, paneSession) {
+		t.Error("no retag should be reported when the tag already matches the anchor")
+	}
+}
+
+func TestApplyPaneAnchorRetag_AdoptsUntaggedWindow(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+
+	// Window @14 was born untagged (from `n`), its pane later emitted a hook
+	// for session B. No prior managed entry exists -- the retag pass must
+	// still adopt it so Enter on B lands on @14.
+	m := &model{
+		managedWindows: map[string]managedWindow{},
+	}
+	windows := []tmux.WindowInfo{{ID: "@14", PaneID: "%14"}}
+	paneSession := map[string]string{"%14": "B"}
+
+	if !m.applyPaneAnchorRetag(windows, paneSession) {
+		t.Fatal("expected adoption")
+	}
+	mw, ok := m.managedWindows["B"]
+	if !ok {
+		t.Fatal("B should be adopted")
+	}
+	if mw.windowID != "@14" {
+		t.Errorf("B.windowID = %q, want @14", mw.windowID)
+	}
+}
+
+func TestApplyPaneAnchorRetag_IgnoresDashboardAndPanelessWindows(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+	m := &model{
+		managedWindows: map[string]managedWindow{
+			"A": {windowID: "@1", sessionID: "A", project: "/proj"},
+		},
+	}
+	windows := []tmux.WindowInfo{
+		{ID: "@0", Name: tmux.DashboardWindow, PaneID: "%0"}, // must be ignored
+		{ID: "@1", PaneID: ""},                                // no pane id → skip
+	}
+	paneSession := map[string]string{"%0": "should-not-steal", "%1": "should-not-match-empty"}
+	if m.applyPaneAnchorRetag(windows, paneSession) {
+		t.Error("dashboard and pane-less windows must not trigger a retag")
+	}
+	if _, ok := m.managedWindows["A"]; !ok {
+		t.Error("A should be untouched")
 	}
 }
 

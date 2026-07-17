@@ -13,7 +13,7 @@ const (
 )
 
 // SessionName is the tmux session this c9s process is bound to. Defaults to
-// "c9s" — the legacy single-session name — but each terminal that bootstraps
+// "c9s" -- the legacy single-session name -- but each terminal that bootstraps
 // a fresh c9s gets its own name ("c9s-2", "c9s-3", …) so two dashboards in
 // two terminals don't mirror each other. Set via SetCurrentSession before
 // any tmux call. The `--inside-tmux` child resolves it from tmux itself via
@@ -141,7 +141,7 @@ func SessionHasClient(name string) bool {
 //     (so re-running c9s after a detach reattaches).
 //   - Otherwise, return the lowest free c9s* name.
 //
-// Pure logic over ListC9sSessions / SessionHasClient — see those for the
+// Pure logic over ListC9sSessions / SessionHasClient -- see those for the
 // underlying tmux calls.
 func PickSessionName(force bool) string {
 	existing := ListC9sSessions()
@@ -249,7 +249,7 @@ func Attach() error {
 
 // NewWindow creates a new tmux window in the c9s session with the given
 // name and command. The command is launched directly (via `sh -c` to honor
-// env-var prefixes like `ANTHROPIC_MODEL=...`) — no wrapping shell adds
+// env-var prefixes like `ANTHROPIC_MODEL=...`) -- no wrapping shell adds
 // hints or trailing tmux calls. When the command exits the window closes,
 // and the `pane-exited` session hook installed by SetupNavigationKeys
 // selects the dashboard. Returns the window ID.
@@ -328,7 +328,7 @@ func shellQuoteJoin(args []string) string {
 func ListWindows() ([]WindowInfo, error) {
 	out, err := exec.Command("tmux", "list-windows",
 		"-t", SessionName,
-		"-F", "#{window_id}\t#{window_name}\t#{pane_current_command}\t#{@session-id}",
+		"-F", "#{window_id}\t#{window_name}\t#{pane_current_command}\t#{@session-id}\t#{pane_id}",
 	).Output()
 	if err != nil {
 		return nil, err
@@ -339,7 +339,7 @@ func ListWindows() ([]WindowInfo, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 4)
+		parts := strings.SplitN(line, "\t", 5)
 		if len(parts) < 2 {
 			continue
 		}
@@ -349,6 +349,9 @@ func ListWindows() ([]WindowInfo, error) {
 		}
 		if len(parts) >= 4 {
 			w.SessionID = parts[3]
+		}
+		if len(parts) >= 5 {
+			w.PaneID = parts[4]
 		}
 		windows = append(windows, w)
 	}
@@ -361,6 +364,7 @@ type WindowInfo struct {
 	Name      string // window name
 	Command   string // current pane command
 	SessionID string // @session-id user option (empty if not set)
+	PaneID    string // e.g. %23 -- active pane id (single-pane windows only)
 }
 
 // PaneStatus represents the state of a claude session inside a tmux pane.
@@ -513,7 +517,7 @@ func ConfigureStatusBar(keys NavKeys, colors StatusColors, version string, scrol
 	// Claude Code requests them itself when it wants Ctrl+Enter for newline,
 	// so "on" preserves that. The previous value "always" forced CSI u for
 	// every key, which broke plain Esc inside Claude Code's /agents prompt
-	// — `\x1b` arrived as `\x1b[27u` and the input parser ignored it.
+	// -- `\x1b` arrived as `\x1b[27u` and the input parser ignored it.
 	t("extended-keys", "on")
 	// Allow applications to request extended key mode via CSI u sequences.
 	t("allow-passthrough", "on")
@@ -533,7 +537,7 @@ func ConfigureStatusBar(keys NavKeys, colors StatusColors, version string, scrol
 	// it. If a future tmux/terminal combo regresses, surface this as an
 	// opt-in setting rather than a default.
 
-	// Use status-format to take full control — no default window list.
+	// Use status-format to take full control -- no default window list.
 	t("status-style", fmt.Sprintf("bg=%s,fg=%s", colors.Bg, colors.Fg))
 	t("status-position", "bottom")
 	// Prevent tmux from auto-renaming or truncating window names.
@@ -554,7 +558,7 @@ func ConfigureStatusBar(keys NavKeys, colors StatusColors, version string, scrol
 	// On dashboard: show usage + version right-aligned.
 	// On session windows: show usage + nav hints right-aligned. The
 	// processing/waiting/done state badge lives only in the dashboard
-	// table — keeping it out of the tmux bar reduces visual noise inside
+	// table -- keeping it out of the tmux bar reduces visual noise inside
 	// claude windows. #{@c9s-usage} is set per-window by the tick handler.
 	usageFmt := fmt.Sprintf("#{?#{@c9s-usage},#[fg=%s]#{@c9s-usage}  ,}", colors.Fg)
 	t("status-format[0]",
@@ -569,7 +573,7 @@ func ConfigureStatusBar(keys NavKeys, colors StatusColors, version string, scrol
 // All bindings use if-shell to only activate inside the c9s session;
 // in other sessions the keys pass through normally. Also installs a
 // `pane-exited` session hook that returns to the dashboard when any
-// non-dashboard window exits — the fallback for auto-return when Claude
+// non-dashboard window exits -- the fallback for auto-return when Claude
 // Code hooks aren't installed.
 func SetupNavigationKeys(keys NavKeys) error {
 	// Match both the bare "c9s" session and any "c9s-<N>" instance so

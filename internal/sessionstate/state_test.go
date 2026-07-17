@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func withTempDir(t *testing.T) {
@@ -189,6 +190,38 @@ func TestPatchPreservesUnsetFields(t *testing.T) {
 	}
 	if got.LastNotification != "first" {
 		t.Errorf("LastNotification lost: %q", got.LastNotification)
+	}
+}
+
+func TestPaneSessionMap_FreshestWinsPerPane(t *testing.T) {
+	withTempDir(t)
+	// Two sessions both claim pane %5. Write them out of order to prove the
+	// map sorts by UpdatedAt, not by filesystem order.
+	if err := write(Info{SessionID: "stale", TmuxPane: "%5", UpdatedAt: time.Now().Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := write(Info{SessionID: "fresh", TmuxPane: "%5", UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	// A session with no pane recorded must not appear.
+	if err := SetState("no-pane", StateProcessing, "SessionStart"); err != nil {
+		t.Fatal(err)
+	}
+	got := PaneSessionMap()
+	if got["%5"] != "fresh" {
+		t.Errorf("pane %%5 = %q, want %q", got["%5"], "fresh")
+	}
+	if _, ok := got[""]; ok {
+		t.Errorf("empty pane key should not appear: %v", got)
+	}
+}
+
+func TestPaneSessionMap_EmptyWhenNoStateDir(t *testing.T) {
+	prev := DirOverride
+	DirOverride = "/tmp/definitely-not-a-real-c9s-state-dir-xyz"
+	t.Cleanup(func() { DirOverride = prev })
+	if got := PaneSessionMap(); len(got) != 0 {
+		t.Errorf("expected empty map for missing dir, got %v", got)
 	}
 }
 

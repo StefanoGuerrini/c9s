@@ -171,3 +171,37 @@ func TestItems_GroupByStatusHasNoWorktreeRows(t *testing.T) {
 		}
 	}
 }
+
+func TestMainWorktreeDir_ReturnsMainPath(t *testing.T) {
+	repo := "/tmp/proj"
+	feat := "/tmp/proj-feat"
+	m := stubModel(t, nil, map[string][]git.Worktree{
+		repo: {
+			{Path: repo, Branch: "main", IsMain: true},
+			{Path: feat, Branch: "feat"},
+		},
+	})
+
+	// Called with the repo root -- returns the main path.
+	if got := m.mainWorktreeDir(repo); got != repo {
+		t.Errorf("mainWorktreeDir(repo) = %q, want %q", got, repo)
+	}
+	// Called with a linked worktree path -- the cache is keyed by that dir, so
+	// we seed both cache entries and expect main resolution when the caller
+	// happens to hand us the linked path (git returns the full list either way
+	// in real usage; test the cache-hit path we actually use).
+	m.worktreeCache[feat] = worktreeCacheEntry{
+		worktrees:   []git.Worktree{{Path: repo, Branch: "main", IsMain: true}, {Path: feat, Branch: "feat"}},
+		fingerprint: worktreeFingerprint(feat),
+	}
+	if got := m.mainWorktreeDir(feat); got != repo {
+		t.Errorf("mainWorktreeDir(feat) = %q, want %q", got, repo)
+	}
+}
+
+func TestMainWorktreeDir_EmptyWhenNotAGitRepo(t *testing.T) {
+	m := stubModel(t, nil, nil)
+	if got := m.mainWorktreeDir("/tmp/not-a-repo"); got != "" {
+		t.Errorf("mainWorktreeDir(non-repo) = %q, want empty", got)
+	}
+}
