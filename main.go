@@ -316,8 +316,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Claude switched session ids inside a pane the state file
 				// is the authoritative signal. This corrects the tag before
 				// mtime-based heuristics run.
-				m.retagFromPaneAnchors()
+				events := m.retagFromPaneAnchors()
 				prevReplaced := len(m.replacedSessions)
+				// Consolidate /clear-style transitions (pane rebound to a
+				// new id) into a single dashboard row so the user keeps
+				// working with the same visible session across the switch.
+				m.applyClearOrForkEffects(events, m.sessions)
 				m.reconcileWindows(m.sessions)
 				if len(m.replacedSessions) > prevReplaced {
 					m.saveDashboardState()
@@ -1426,20 +1430,31 @@ func (m *model) reconcileStartupWindows(sessions []claude.SessionInfo) {
 	}
 }
 
+// retagEvent records a single (oldKey → newID) window rebind done by the
+// pane-anchor pass. The follow-up handler consumes these to hide the old
+// dashboard row and carry the title over so /clear feels like a continuation
+// of the same session rather than a jump to a new one.
+type retagEvent struct {
+	oldKey   string // previous managedWindows key (may be a `new-*` tmpKey)
+	newID    string // pane-anchored session id
+	windowID string
+	project  string
+}
+
 // retagFromPaneAnchors uses the tmux pane id recorded by Claude Code hooks to
 // realign managed windows with the session id they're actually running right
 // now. This is the only signal that survives a session-id change from inside
 // the pane (/resume, /clear, compact, --session-id) -- the static @session-id
 // tag we set at window creation goes stale in those cases.
 //
-// Returns true when at least one window was retagged.
-func (m *model) retagFromPaneAnchors() bool {
+// Returns the list of retag events performed; empty when nothing moved.
+func (m *model) retagFromPaneAnchors() []retagEvent {
 	if !m.insideTmux || len(m.managedWindows) == 0 {
-		return false
+		return nil
 	}
 	windows, err := tmux.ListWindows()
 	if err != nil {
-		return false
+		return nil
 	}
 	return m.applyPaneAnchorRetag(windows, sessionstate.PaneSessionMap())
 }
@@ -1454,10 +1469,10 @@ func (m *model) retagFromPaneAnchors() bool {
 //     the `n`-born, tag-less window whose Claude switched sessions via
 //     /resume before c9s could see the change).
 //
-// Returns true when anything changed.
-func (m *model) applyPaneAnchorRetag(windows []tmux.WindowInfo, paneSession map[string]string) bool {
+// Returns the retagEvents performed; nil when nothing changed.
+func (m *model) applyPaneAnchorRetag(windows []tmux.WindowInfo, paneSession map[string]string) []retagEvent {
 	if len(paneSession) == 0 {
-		return false
+		return nil
 	}
 	windowReal := make(map[string]string, len(windows))
 	windowProject := make(map[string]string, len(windows))
@@ -1470,7 +1485,7 @@ func (m *model) applyPaneAnchorRetag(windows []tmux.WindowInfo, paneSession map[
 			windowProject[w.ID] = "" // project resolved from managed entry when available
 		}
 	}
-	changed := false
+	var events []retagEvent
 	// Pass 1: retag drifted managed windows.
 	for key, mw := range m.managedWindows {
 		realID, ok := windowReal[mw.windowID]
@@ -1498,7 +1513,12 @@ func (m *model) applyPaneAnchorRetag(windows []tmux.WindowInfo, paneSession map[
 			paneStatus: mw.paneStatus,
 		}
 		tmux.SetWindowEnv(mw.windowID, "session-id", realID)
-		changed = true
+		events = append(events, retagEvent{
+			oldKey:   key,
+			newID:    realID,
+			windowID: mw.windowID,
+			project:  mw.project,
+		})
 	}
 	// Pass 2: adopt orphan windows whose pane anchors to a session not
 	// already tracked. This picks up untagged `n`-born windows where Claude
@@ -1521,7 +1541,66 @@ func (m *model) applyPaneAnchorRetag(windows []tmux.WindowInfo, paneSession map[
 			project:   windowProject[wid],
 		}
 		tmux.SetWindowEnv(wid, "session-id", realID)
+		events = append(events, retagEvent{
+			oldKey:   "",
+			newID:    realID,
+			windowID: wid,
+			project:  windowProject[wid],
+		})
+	}
+	return events
+}
+
+// applyClearOrForkEffects hides the pre-transition row and carries its title
+// forward so /clear inside a pane feels like a continuation of the same
+// dashboard entry. Fork-like transitions get a "<name> fork" suffix; clear /
+// compact keep the exact name.
+//
+// Ignored for adoption events (empty oldKey) and for tmpKey `new-*` bindings,
+// which don't correspond to an existing dashboard row.
+func (m *model) applyClearOrForkEffects(events []retagEvent, sessions []claude.SessionInfo) bool {
+	if len(events) == 0 {
+		return false
+	}
+	byID := make(map[string]*claude.SessionInfo, len(sessions))
+	for i := range sessions {
+		byID[sessions[i].SessionID] = &sessions[i]
+	}
+	changed := false
+	for _, ev := range events {
+		if ev.oldKey == "" || strings.HasPrefix(ev.oldKey, "new-") {
+			continue
+		}
+		if m.replacedSessions[ev.oldKey] {
+			continue
+		}
+		oldSession, oldOK := byID[ev.oldKey]
+		if !oldOK || oldSession.Status == claude.StatusArchived {
+			// Compaction path: the old JSONL is gone. Nothing to hide and
+			// no title to inherit -- the new row stands on its own.
+			continue
+		}
+		newSession, newOK := byID[ev.newID]
+
+		// Hide the old row: managedWindows no longer points to it (we just
+		// retagged), and leaving it visible would tempt the user to click
+		// what is now a dead-window duplicate.
+		m.replacedSessions[ev.oldKey] = true
 		changed = true
+
+		// Carry the title over. Suffix "fork" only when the new session has
+		// its own content -- otherwise this is a /clear (blank new session)
+		// and inheriting exactly is the natural continuation.
+		if newOK && newSession.CustomTitle == "" {
+			oldName := oldSession.DisplayName()
+			if oldName != "" {
+				title := oldName
+				if newSession.Summary != "" || newSession.FirstPrompt != "" {
+					title = oldName + " fork"
+				}
+				claude.RenameSession(newSession.Dir, ev.newID, title)
+			}
+		}
 	}
 	return changed
 }

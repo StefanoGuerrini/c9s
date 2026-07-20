@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -316,7 +317,7 @@ func TestApplyPaneAnchorRetag_ReassignsToRealSession(t *testing.T) {
 	}
 	paneSession := map[string]string{"%14": "B"}
 
-	if !m.applyPaneAnchorRetag(windows, paneSession) {
+	if len(m.applyPaneAnchorRetag(windows, paneSession)) == 0 {
 		t.Fatal("expected retag to report a change")
 	}
 	mw, ok := m.managedWindows["B"]
@@ -344,7 +345,7 @@ func TestApplyPaneAnchorRetag_NoopWhenTagAlreadyMatches(t *testing.T) {
 	}
 	windows := []tmux.WindowInfo{{ID: "@1", PaneID: "%1"}}
 	paneSession := map[string]string{"%1": "A"}
-	if m.applyPaneAnchorRetag(windows, paneSession) {
+	if events := m.applyPaneAnchorRetag(windows, paneSession); len(events) > 0 {
 		t.Error("no retag should be reported when the tag already matches the anchor")
 	}
 }
@@ -362,7 +363,7 @@ func TestApplyPaneAnchorRetag_AdoptsUntaggedWindow(t *testing.T) {
 	windows := []tmux.WindowInfo{{ID: "@14", PaneID: "%14"}}
 	paneSession := map[string]string{"%14": "B"}
 
-	if !m.applyPaneAnchorRetag(windows, paneSession) {
+	if len(m.applyPaneAnchorRetag(windows, paneSession)) == 0 {
 		t.Fatal("expected adoption")
 	}
 	mw, ok := m.managedWindows["B"]
@@ -387,11 +388,87 @@ func TestApplyPaneAnchorRetag_IgnoresDashboardAndPanelessWindows(t *testing.T) {
 		{ID: "@1", PaneID: ""},                                // no pane id → skip
 	}
 	paneSession := map[string]string{"%0": "should-not-steal", "%1": "should-not-match-empty"}
-	if m.applyPaneAnchorRetag(windows, paneSession) {
+	if events := m.applyPaneAnchorRetag(windows, paneSession); len(events) > 0 {
 		t.Error("dashboard and pane-less windows must not trigger a retag")
 	}
 	if _, ok := m.managedWindows["A"]; !ok {
 		t.Error("A should be untouched")
+	}
+}
+
+func TestApplyClearOrForkEffects_ClearHidesOldAndInheritsTitle(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &model{replacedSessions: map[string]bool{}}
+	// Simulate the pane-anchor pass that just moved window @W from A -> B.
+	events := []retagEvent{{oldKey: "A", newID: "B", windowID: "@W", project: "/proj"}}
+	// A had a custom title and a JSONL on disk; B is a fresh /clear session
+	// with no content of its own.
+	sessions := []claude.SessionInfo{
+		{SessionID: "A", CustomTitle: "Investigating flaky test", Status: claude.StatusResumable, Dir: dir, ProjectPath: "/proj"},
+		{SessionID: "B", Status: claude.StatusActive, Dir: dir, ProjectPath: "/proj"},
+	}
+
+	if !m.applyClearOrForkEffects(events, sessions) {
+		t.Fatal("expected clear-effects to report a change")
+	}
+	if !m.replacedSessions["A"] {
+		t.Error("A should be hidden after /clear")
+	}
+	// The new session should have inherited A's title (no "fork" suffix
+	// because B has no content).
+	idx := filepath.Join(dir, "sessions-index.json")
+	data, err := os.ReadFile(idx)
+	if err != nil {
+		t.Fatalf("read sessions-index: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"customTitle": "Investigating flaky test"`)) {
+		t.Errorf("B should inherit A's title, got: %s", data)
+	}
+}
+
+func TestApplyClearOrForkEffects_ForkSuffixesTitle(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+	dir := t.TempDir()
+
+	m := &model{replacedSessions: map[string]bool{}}
+	events := []retagEvent{{oldKey: "A", newID: "B", windowID: "@W", project: "/proj"}}
+	sessions := []claude.SessionInfo{
+		{SessionID: "A", CustomTitle: "Investigating", Status: claude.StatusResumable, Dir: dir, ProjectPath: "/proj"},
+		// B has its own content -> /fork, not /clear.
+		{SessionID: "B", Status: claude.StatusActive, Dir: dir, ProjectPath: "/proj", FirstPrompt: "explore alternate path"},
+	}
+	if !m.applyClearOrForkEffects(events, sessions) {
+		t.Fatal("expected effects to fire")
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "sessions-index.json"))
+	if !bytes.Contains(data, []byte(`"customTitle": "Investigating fork"`)) {
+		t.Errorf("B should be titled '<A> fork', got: %s", data)
+	}
+}
+
+func TestApplyClearOrForkEffects_SkipsAdoptionAndTmpKeys(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+	m := &model{replacedSessions: map[string]bool{}}
+	// Empty oldKey = adoption; new-* prefix = tmpKey. Neither is a dashboard
+	// row the user would recognize, so nothing to hide or inherit from.
+	events := []retagEvent{
+		{oldKey: "", newID: "B", windowID: "@W"},
+		{oldKey: "new-42", newID: "C", windowID: "@V"},
+	}
+	sessions := []claude.SessionInfo{{SessionID: "B"}, {SessionID: "C"}}
+	if m.applyClearOrForkEffects(events, sessions) {
+		t.Error("adoption/tmpKey events must not produce clear/fork side effects")
+	}
+	if len(m.replacedSessions) != 0 {
+		t.Errorf("expected no replaced sessions, got %v", m.replacedSessions)
 	}
 }
 
