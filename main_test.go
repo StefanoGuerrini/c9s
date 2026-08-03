@@ -432,7 +432,7 @@ func TestApplyClearOrForkEffects_ClearHidesOldAndInheritsTitle(t *testing.T) {
 	}
 }
 
-func TestApplyClearOrForkEffects_ForkSuffixesTitle(t *testing.T) {
+func TestApplyClearOrForkEffects_ForkKeepsOldVisibleAndSuffixesTitle(t *testing.T) {
 	tmux.DryRun = true
 	t.Cleanup(func() { tmux.DryRun = false })
 	dir := t.TempDir()
@@ -444,8 +444,9 @@ func TestApplyClearOrForkEffects_ForkSuffixesTitle(t *testing.T) {
 		// B has its own content -> /fork, not /clear.
 		{SessionID: "B", Status: claude.StatusActive, Dir: dir, ProjectPath: "/proj", FirstPrompt: "explore alternate path"},
 	}
-	if !m.applyClearOrForkEffects(events, sessions) {
-		t.Fatal("expected effects to fire")
+	m.applyClearOrForkEffects(events, sessions)
+	if m.replacedSessions["A"] {
+		t.Error("A must stay visible on a fork -- the old session is still real work the user may want to resume")
 	}
 	data, _ := os.ReadFile(filepath.Join(dir, "sessions-index.json"))
 	if !bytes.Contains(data, []byte(`"customTitle": "Investigating fork"`)) {

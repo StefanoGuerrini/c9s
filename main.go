@@ -1551,10 +1551,15 @@ func (m *model) applyPaneAnchorRetag(windows []tmux.WindowInfo, paneSession map[
 	return events
 }
 
-// applyClearOrForkEffects hides the pre-transition row and carries its title
-// forward so /clear inside a pane feels like a continuation of the same
-// dashboard entry. Fork-like transitions get a "<name> fork" suffix; clear /
-// compact keep the exact name.
+// applyClearOrForkEffects reacts to a pane-anchor rebind (Claude Code switched
+// session-ids inside an existing pane). Two cases:
+//
+//   - /clear or /compact: the new session is blank. The old row is hidden so
+//     the dashboard collapses to a single entry that keeps routing Enter to
+//     the same tmux window, and the old title is carried forward.
+//   - /fork or resume-with-new-id: the new session has its own content. Both
+//     rows stay visible so the user can still open the old one; the new row
+//     gets a "<old> fork" title so the lineage is obvious.
 //
 // Ignored for adoption events (empty oldKey) and for tmpKey `new-*` bindings,
 // which don't correspond to an existing dashboard row.
@@ -1581,24 +1586,25 @@ func (m *model) applyClearOrForkEffects(events []retagEvent, sessions []claude.S
 			continue
 		}
 		newSession, newOK := byID[ev.newID]
+		newHasContent := newOK && (newSession.Summary != "" || newSession.FirstPrompt != "")
 
-		// Hide the old row: managedWindows no longer points to it (we just
-		// retagged), and leaving it visible would tempt the user to click
-		// what is now a dead-window duplicate.
-		m.replacedSessions[ev.oldKey] = true
-		changed = true
-
-		// Carry the title over. Suffix "fork" only when the new session has
-		// its own content -- otherwise this is a /clear (blank new session)
-		// and inheriting exactly is the natural continuation.
-		if newOK && newSession.CustomTitle == "" {
-			oldName := oldSession.DisplayName()
-			if oldName != "" {
-				title := oldName
-				if newSession.Summary != "" || newSession.FirstPrompt != "" {
-					title = oldName + " fork"
+		if !newHasContent {
+			// /clear: hide the old row and carry the title as-is.
+			m.replacedSessions[ev.oldKey] = true
+			changed = true
+			if newOK && newSession.CustomTitle == "" {
+				if oldName := oldSession.DisplayName(); oldName != "" {
+					claude.RenameSession(newSession.Dir, ev.newID, oldName)
 				}
-				claude.RenameSession(newSession.Dir, ev.newID, title)
+			}
+			continue
+		}
+
+		// /fork: both sessions are real work -- keep the old row visible so
+		// the user can still resume it. Only annotate the new row's title.
+		if newOK && newSession.CustomTitle == "" {
+			if oldName := oldSession.DisplayName(); oldName != "" {
+				claude.RenameSession(newSession.Dir, ev.newID, oldName+" fork")
 			}
 		}
 	}
