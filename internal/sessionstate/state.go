@@ -72,6 +72,16 @@ type Info struct {
 	TmuxPane string `json:"tmux_pane,omitempty"`
 }
 
+// PaneStaleAfter bounds how long a state file's TmuxPane claim stays
+// authoritative. tmux reissues pane IDs (e.g. "%5") from zero every time its
+// server restarts (which happens whenever the c9s tmux session is killed),
+// so a long-dead session's leftover file can otherwise resurrect and claim a
+// pane that now belongs to a brand-new, unrelated session -- SessionEnd
+// doesn't fire on a forced kill, so nothing clears the old claim on its own.
+// Any pane still genuinely in use gets its claim refreshed well within this
+// window by the next hook event, so the cutoff never affects a live pane.
+const PaneStaleAfter = 6 * time.Hour
+
 // DirOverride lets tests redirect state file reads/writes.
 var DirOverride string
 
@@ -178,12 +188,18 @@ func Patch(sessionID string, fn func(*Info)) error {
 // PaneSessionMap returns paneID → sessionID drawn from every state file that
 // records a TmuxPane. When two sessions claim the same pane (e.g. one ended
 // but its file lingers), the freshest UpdatedAt wins -- that's the session
-// currently attached. Empty map if the state dir doesn't exist yet.
+// currently attached. Claims older than PaneStaleAfter are ignored entirely:
+// a live pane's claim is refreshed by hooks far more often than that, so a
+// surviving old claim is always a leftover from a session that's gone (a
+// crash, `kill -9`, or an external `tmux kill-session` bypassing c9s's own
+// cleanup) rather than a legitimately quiet one. Empty map if the state dir
+// doesn't exist yet.
 func PaneSessionMap() map[string]string {
 	entries, err := os.ReadDir(dir())
 	if err != nil {
 		return map[string]string{}
 	}
+	cutoff := time.Now().Add(-PaneStaleAfter)
 	type winner struct {
 		sessionID string
 		updatedAt time.Time
@@ -195,7 +211,7 @@ func PaneSessionMap() map[string]string {
 		}
 		sid := e.Name()[:len(e.Name())-len(".json")]
 		info, err := Read(sid)
-		if err != nil || info.TmuxPane == "" {
+		if err != nil || info.TmuxPane == "" || info.UpdatedAt.Before(cutoff) {
 			continue
 		}
 		if cur, ok := best[info.TmuxPane]; !ok || info.UpdatedAt.After(cur.updatedAt) {
@@ -207,6 +223,37 @@ func PaneSessionMap() map[string]string {
 		out[pane] = w.sessionID
 	}
 	return out
+}
+
+// PurgeStale deletes state files whose UpdatedAt is older than maxAge.
+// Ungracefully-killed sessions (e.g. `q` tearing down the whole tmux server)
+// never run their SessionEnd hook, so their file lingers forever with a
+// TmuxPane value that tmux will happily hand to an unrelated pane after a
+// server restart -- PaneSessionMap would then misattribute that pane to the
+// long-dead session. Called on dashboard startup; safe to run anytime since
+// a live session's hooks refresh UpdatedAt continuously. Returns the number
+// of files removed.
+func PurgeStale(maxAge time.Duration) int {
+	entries, err := os.ReadDir(dir())
+	if err != nil {
+		return 0
+	}
+	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		sid := e.Name()[:len(e.Name())-len(".json")]
+		info, err := Read(sid)
+		if err != nil || info.UpdatedAt.After(cutoff) {
+			continue
+		}
+		if Remove(sid) == nil {
+			removed++
+		}
+	}
+	return removed
 }
 
 // Remove deletes the state file for a session. Used by SessionEnd.

@@ -41,6 +41,11 @@ var cache struct {
 	// Process list cache (short TTL, just avoid calling lsof too often)
 	procsTime time.Time
 	procs     []ClaudeProcess
+
+	// Background-agent session cache (short TTL, avoid shelling out to
+	// `claude agents` on every tick)
+	bgAgentsTime time.Time
+	bgAgents     map[string]bool
 }
 
 type cachedTokens struct {
@@ -58,10 +63,11 @@ type cachedTokens struct {
 type Status int
 
 const (
-	StatusArchived  Status = iota // no JSONL file on disk
-	StatusResumable               // JSONL file exists, no active process
-	StatusIdle                    // claude process running, but not recently active
-	StatusActive                  // JSONL file modified within ActiveThreshold
+	StatusArchived    Status = iota // no JSONL file on disk
+	StatusResumable                 // JSONL file exists, no active process
+	StatusIdle                      // claude process running, but not recently active
+	StatusActive                    // JSONL file modified within ActiveThreshold
+	StatusBackground                // claimed by a Claude Code background agent (claude --bg)
 )
 
 // ActiveThreshold is how recently a session JSONL must be modified to count as "active".
@@ -75,6 +81,8 @@ func (s Status) String() string {
 		return "idle"
 	case StatusResumable:
 		return "resumable"
+	case StatusBackground:
+		return "background"
 	default:
 		return "archived"
 	}
@@ -377,6 +385,16 @@ func listAllSessionsFrom(historyPath string) ([]SessionInfo, error) {
 		}
 	}
 
+	// A background agent holds the session regardless of what its JSONL
+	// mtime suggests -- a plain `claude --resume` would fail against it, so
+	// this overrides any status computed above.
+	bgAgents := BackgroundAgentSessions()
+	for i := range sessions {
+		if bgAgents[sessions[i].SessionID] {
+			sessions[i].Status = StatusBackground
+		}
+	}
+
 	sort.Slice(sessions, func(i, j int) bool {
 		return sessions[i].Modified.After(sessions[j].Modified)
 	})
@@ -626,6 +644,54 @@ func GetSupersededSessions() map[string]bool {
 		}
 	}
 	return superseded
+}
+
+// BackgroundAgentSessions returns the session IDs currently claimed by a
+// Claude Code background agent (`claude --bg`). Their process runs detached
+// from any tmux pane -- `ps`/`lsof` never sees `--resume <id>` in its args --
+// so plain `claude --resume` refuses to attach and exits immediately with an
+// error. Callers must check this before resuming, or the opened window just
+// flashes and closes.
+func BackgroundAgentSessions() map[string]bool {
+	cache.mu.Lock()
+	if time.Since(cache.bgAgentsTime) < 5*time.Second && cache.bgAgents != nil {
+		result := cache.bgAgents
+		cache.mu.Unlock()
+		return result
+	}
+	cache.mu.Unlock()
+
+	agents := map[string]bool{}
+	if out, err := exec.Command("claude", "agents", "--json").Output(); err == nil {
+		agents = parseBackgroundAgentSessions(out)
+	}
+
+	cache.mu.Lock()
+	cache.bgAgentsTime = time.Now()
+	cache.bgAgents = agents
+	cache.mu.Unlock()
+
+	return agents
+}
+
+// parseBackgroundAgentSessions extracts session IDs with kind "background"
+// from `claude agents --json` output. Split out from BackgroundAgentSessions
+// for testing without shelling out.
+func parseBackgroundAgentSessions(data []byte) map[string]bool {
+	agents := make(map[string]bool)
+	var entries []struct {
+		Kind      string `json:"kind"`
+		SessionID string `json:"sessionId"`
+	}
+	if json.Unmarshal(data, &entries) != nil {
+		return agents
+	}
+	for _, e := range entries {
+		if e.Kind == "background" {
+			agents[e.SessionID] = true
+		}
+	}
+	return agents
 }
 
 // ReadTokenUsageForTest exposes readTokenUsage for use in external test packages.

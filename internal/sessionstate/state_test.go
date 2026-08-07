@@ -216,6 +216,21 @@ func TestPaneSessionMap_FreshestWinsPerPane(t *testing.T) {
 	}
 }
 
+func TestPaneSessionMap_IgnoresStaleClaims(t *testing.T) {
+	withTempDir(t)
+	// A claim old enough to predate any plausible current tmux server
+	// (PurgeStale's job normally, but PaneSessionMap must never trust one
+	// even if it's the ONLY entry for that pane -- the collision this
+	// guards against happens because it's the only entry).
+	if err := write(Info{SessionID: "long-dead", TmuxPane: "%5", UpdatedAt: time.Now().Add(-30 * 24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	got := PaneSessionMap()
+	if _, ok := got["%5"]; ok {
+		t.Errorf("stale claim should be excluded, got %v", got)
+	}
+}
+
 func TestPaneSessionMap_EmptyWhenNoStateDir(t *testing.T) {
 	prev := DirOverride
 	DirOverride = "/tmp/definitely-not-a-real-c9s-state-dir-xyz"
@@ -241,5 +256,34 @@ func TestAtomicWrite(t *testing.T) {
 	// File exists at expected path.
 	if _, err := os.Stat(filepath.Join(DirOverride, "s5.json")); err != nil {
 		t.Errorf("expected file: %v", err)
+	}
+}
+
+func TestPurgeStale(t *testing.T) {
+	withTempDir(t)
+	if err := write(Info{SessionID: "old", UpdatedAt: time.Now().Add(-48 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := write(Info{SessionID: "fresh", UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+
+	n := PurgeStale(24 * time.Hour)
+
+	if n != 1 {
+		t.Errorf("removed %d files, want 1", n)
+	}
+	if _, err := Read("old"); err == nil {
+		t.Error("old session's file should have been purged")
+	}
+	if _, err := Read("fresh"); err != nil {
+		t.Errorf("fresh session's file should survive: %v", err)
+	}
+}
+
+func TestPurgeStaleEmptyDir(t *testing.T) {
+	withTempDir(t)
+	if n := PurgeStale(24 * time.Hour); n != 0 {
+		t.Errorf("expected 0 removed for empty dir, got %d", n)
 	}
 }

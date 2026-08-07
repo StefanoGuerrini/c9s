@@ -29,6 +29,13 @@ var cfg config.Config
 // debugLog writes to /tmp/c9s-debug.log when --debug is enabled.
 var debugLog = func(string, ...any) {}
 
+// staleStateAge is how long a session state file can go without a hook
+// update before startup treats it as an orphan from an ungracefully-killed
+// session and purges it (see sessionstate.PurgeStale). A live session's
+// hooks (Stop, PreToolUse, ...) refresh UpdatedAt far more often than this,
+// even when the user is idle mid-conversation.
+const staleStateAge = 24 * time.Hour
+
 func initDebugLog(enabled bool) {
 	if !enabled {
 		return
@@ -59,6 +66,7 @@ var (
 	stIdle        lipgloss.Style
 	stResumable   lipgloss.Style
 	stArchived    lipgloss.Style
+	stBackground  lipgloss.Style
 	infoStyle     lipgloss.Style
 	errStyle      lipgloss.Style
 	stWaiting     lipgloss.Style
@@ -83,6 +91,7 @@ func applyColors(c config.Colors) {
 	stIdle = lipgloss.NewStyle().Foreground(lipgloss.Color(c.Idle))
 	stResumable = lipgloss.NewStyle().Foreground(lipgloss.Color(c.Resumable))
 	stArchived = lipgloss.NewStyle().Foreground(lipgloss.Color(c.Archived))
+	stBackground = lipgloss.NewStyle().Foreground(lipgloss.Color(c.Background)).Bold(true)
 	infoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(c.Info))
 	errStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(c.Error))
 	stWaiting = lipgloss.NewStyle().Foreground(lipgloss.Color(c.Waiting)).Bold(true)
@@ -378,6 +387,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !tmux.WindowExists(mw.windowID) {
 				debugLog("tick → window %s gone, removing session=%q", mw.windowID, key)
 				delete(m.managedWindows, key)
+				// The window is gone -- release its pane claim now rather
+				// than waiting on SessionEnd (which never fires if the
+				// window was killed rather than exited) or the startup
+				// purge, so a reused pane ID can't collide with this stale
+				// entry in the meantime.
+				sessionstate.Remove(mw.sessionID)
 				continue
 			}
 
@@ -509,6 +524,14 @@ func (m model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil // don't quit, keep dashboard alive
 			}
 			tmux.CleanupNavigationKeys(navKeys())
+			// Every managed session is about to die without a chance to run
+			// its SessionEnd hook -- release their pane claims now. Without
+			// this, a same-day restart reuses tmux's low pane IDs almost
+			// immediately and collides with these still-fresh (well under
+			// the startup purge's age cutoff) leftover claims.
+			for _, mw := range m.managedWindows {
+				sessionstate.Remove(mw.sessionID)
+			}
 			// Kill the entire tmux session so we don't fall through
 			// to a claude window after the dashboard exits.
 			tmux.KillSession()
@@ -642,6 +665,7 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 		// Window was closed externally -- clean up and fall through to re-open.
 		debugLog("openSession → window %s gone, cleaning up", mw.windowID)
 		delete(m.managedWindows, s.SessionID)
+		sessionstate.Remove(s.SessionID)
 	}
 
 	// Check for superseded/forked sessions to prevent duplicate windows.
@@ -690,6 +714,17 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 	}
 
 	switch s.Status {
+	case claude.StatusBackground:
+		// A session claimed by a Claude Code background agent can't be
+		// resumed with a plain `claude --resume` -- the CLI refuses since
+		// the agent process already owns it, and the window would flash and
+		// close before the user could read the error. `claude agents` is
+		// the only way to attach; open its interactive picker directly
+		// instead of dead-ending on a status message. We don't know which
+		// session id the user will land on, so track the window with a
+		// tmpKey (same as the `n` new-session flow) -- the pane-anchor pass
+		// adopts it automatically once hooks fire for the real id.
+		return m.openAgentsPicker(s.ProjectPath)
 	case claude.StatusActive, claude.StatusIdle:
 		// Resume into the running session (claude handles concurrent access).
 		claudeCmd = fmt.Sprintf("claude --resume %s", s.SessionID)
@@ -732,6 +767,26 @@ func (m model) openSession(items []displayItem) (tea.Model, tea.Cmd) {
 	}
 	seedSessionState(s.SessionID, workDir)
 
+	return m, nil
+}
+
+// openAgentsPicker opens `claude agents` (the only CLI-level way to attach to
+// a background agent) in a new tmux window. There's no flag to preselect a
+// specific agent, so this opens the picker unscoped -- background agents are
+// rare enough in practice that finding the right one in the list is trivial.
+// The window is tracked with a tmpKey since we don't know which session id
+// the user will land on; the pane-anchor pass (applyPaneAnchorRetag) adopts
+// it once hooks fire for the real id, same as the `n` new-session flow.
+func (m model) openAgentsPicker(workDir string) (tea.Model, tea.Cmd) {
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
+	windowID, err := tmux.NewWindow("claude agents", "claude agents", workDir)
+	if err != nil {
+		return m, statusCmd(fmt.Sprintf("failed to open agents picker: %v", err), true)
+	}
+	tmpKey := fmt.Sprintf("new-%d", time.Now().UnixNano())
+	m.managedWindows[tmpKey] = managedWindow{windowID: windowID, project: workDir}
 	return m, nil
 }
 
@@ -1226,15 +1281,49 @@ func fmtTimeAgo(t time.Time) string {
 	}
 }
 
+// clearOrForkOutcome decides what a session-id transition (oldSession →
+// newSession, same tmux window) means and what to do about it:
+//
+//   - /clear or /compact: the new session is blank. hide is true (collapse
+//     the dashboard to one row) and newTitle carries the old name forward
+//     as-is.
+//   - /fork or resume-with-new-id: the new session has its own content. hide
+//     is false (both rows stay visible) and newTitle gets a " fork" suffix
+//     so the lineage is obvious.
+//
+// oldSession must be non-nil and non-archived -- callers are responsible for
+// the compaction check (an archived/missing old session means the JSONL is
+// gone; there's nothing to hide and no title worth inheriting, so skip
+// calling this at all rather than pass a zero value). newSession may be nil
+// (new session's SessionInfo hasn't shown up in a ListAllSessions pass yet);
+// newTitle is empty whenever there's nothing to write, including when
+// newSession already has a custom title of its own.
+//
+// Shared by the two independent paths that detect these transitions:
+// pane-anchor retagging (immediate, hook-driven) and mtime/forkedFrom
+// reconciliation (fallback, for windows with no pane-anchor signal yet).
+func clearOrForkOutcome(oldSession, newSession *claude.SessionInfo) (hide bool, newTitle string) {
+	newHasContent := newSession != nil && (newSession.Summary != "" || newSession.FirstPrompt != "")
+	oldName := oldSession.DisplayName()
+
+	if newSession == nil || newSession.CustomTitle != "" || oldName == "" {
+		return !newHasContent, ""
+	}
+	if newHasContent {
+		return false, oldName + " fork"
+	}
+	return true, oldName
+}
+
 // reconcileWindows matches managed windows to the claude sessions actually
 // running inside them. This handles two cases:
 // 1. New sessions (n key): tracked with tmpKey, sessionID empty
 // 2. Forked sessions (/fork): old sessionID in map, new session running in window
 //
-// For forks, the claude process keeps the old --resume arg, so we can't trust
-// When a managed window's tracked session goes stale (JSONL not written recently),
-// find the most recently active session in the same project and re-key.
-// This handles /clear (new session ID) and /fork (new session with context).
+// When a managed window's tracked session goes stale (JSONL not written
+// recently), find the most recently active session in the same project and
+// re-key -- the fallback for /clear and /fork transitions that happen
+// before the pane-anchor hook fires (see clearOrForkOutcome).
 func (m *model) reconcileWindows(sessions []claude.SessionInfo) {
 	// Build sessionID → session lookup.
 	sessionByID := make(map[string]*claude.SessionInfo)
@@ -1315,45 +1404,22 @@ func (m *model) reconcileWindows(sessions []claude.SessionInfo) {
 			paneStatus: mw.paneStatus,
 		}
 
-		// Determine if this is a fork, clear, or compaction.
-		// Fork: old session file still on disk AND new session has content.
-		// Clear: old session file still on disk AND new session is blank.
-		// Compaction: old session file gone (archived) -- same as clear.
-		oldOnDisk := false
-		if oldSession, ok := sessionByID[mw.sessionID]; ok {
-			oldOnDisk = oldSession.Status != claude.StatusArchived
+		// Compaction: the old session's JSONL is archived/gone. Nothing to
+		// hide and no title worth inheriting -- skip the clear/fork decision
+		// entirely and let the new row stand on its own.
+		oldSession, oldOnDisk := sessionByID[mw.sessionID]
+		if oldOnDisk && oldSession.Status == claude.StatusArchived {
+			oldOnDisk = false
 		}
-		newHasContent := false
-		if newSession, ok := sessionByID[bestID]; ok {
-			newHasContent = newSession.Summary != "" || newSession.FirstPrompt != ""
-		}
-		isFork := oldOnDisk && newHasContent
-		debugLog("reconcile → type: fork=%v (oldOnDisk=%v newHasContent=%v)", isFork, oldOnDisk, newHasContent)
-
-		if mw.sessionID != "" && !strings.HasPrefix(key, "new-") {
-			if isFork {
-				// Fork: keep old session visible, name new one "<name> fork".
-				// Only rename if the new session doesn't already have a custom title.
-				if oldSession, ok := sessionByID[mw.sessionID]; ok {
-					if newSession, ok := sessionByID[bestID]; ok && newSession.CustomTitle == "" {
-						oldName := oldSession.DisplayName()
-						if oldName != "" {
-							claude.RenameSession(newSession.Dir, bestID, oldName+" fork")
-						}
-					}
-				}
-			} else {
-				// Clear: hide old session, carry over the name.
-				// Only rename if the new session doesn't already have a custom title.
+		if mw.sessionID != "" && !strings.HasPrefix(key, "new-") && oldOnDisk {
+			newSession := sessionByID[bestID] // may be nil (map lookup on pointer type)
+			hide, newTitle := clearOrForkOutcome(oldSession, newSession)
+			debugLog("reconcile → type: hide=%v newTitle=%q", hide, newTitle)
+			if hide {
 				m.replacedSessions[key] = true
-				if oldSession, ok := sessionByID[mw.sessionID]; ok {
-					if newSession, ok := sessionByID[bestID]; ok && newSession.CustomTitle == "" {
-						oldName := oldSession.DisplayName()
-						if oldName != "" {
-							claude.RenameSession(newSession.Dir, bestID, oldName)
-						}
-					}
-				}
+			}
+			if newTitle != "" {
+				claude.RenameSession(newSession.Dir, bestID, newTitle)
 			}
 		}
 	}
@@ -1585,27 +1651,14 @@ func (m *model) applyClearOrForkEffects(events []retagEvent, sessions []claude.S
 			// no title to inherit -- the new row stands on its own.
 			continue
 		}
-		newSession, newOK := byID[ev.newID]
-		newHasContent := newOK && (newSession.Summary != "" || newSession.FirstPrompt != "")
-
-		if !newHasContent {
-			// /clear: hide the old row and carry the title as-is.
+		newSession := byID[ev.newID] // may be nil (map lookup on pointer type)
+		hide, newTitle := clearOrForkOutcome(oldSession, newSession)
+		if hide {
 			m.replacedSessions[ev.oldKey] = true
 			changed = true
-			if newOK && newSession.CustomTitle == "" {
-				if oldName := oldSession.DisplayName(); oldName != "" {
-					claude.RenameSession(newSession.Dir, ev.newID, oldName)
-				}
-			}
-			continue
 		}
-
-		// /fork: both sessions are real work -- keep the old row visible so
-		// the user can still resume it. Only annotate the new row's title.
-		if newOK && newSession.CustomTitle == "" {
-			if oldName := oldSession.DisplayName(); oldName != "" {
-				claude.RenameSession(newSession.Dir, ev.newID, oldName+" fork")
-			}
+		if newTitle != "" {
+			claude.RenameSession(newSession.Dir, ev.newID, newTitle)
 		}
 	}
 	return changed
@@ -2377,6 +2430,9 @@ func (m model) closeWindow(items []displayItem) (tea.Model, tea.Cmd) {
 	debugLog("closeWindow session=%q window=%s", s.SessionID, mw.windowID)
 	tmux.KillWindow(mw.windowID)
 	delete(m.managedWindows, s.SessionID)
+	// kill-window doesn't give the pane's claude process a chance to run its
+	// SessionEnd hook, so release its pane claim ourselves.
+	sessionstate.Remove(s.SessionID)
 	return m, statusCmd("window closed", false)
 }
 
@@ -3300,16 +3356,18 @@ func (m model) items() []displayItem {
 				sortOrder = 0
 			case "waiting":
 				sortOrder = 1
-			case "active":
+			case "background":
 				sortOrder = 2
-			case "idle":
+			case "active":
 				sortOrder = 3
-			case "done":
+			case "idle":
 				sortOrder = 4
-			case "resumable":
+			case "done":
 				sortOrder = 5
-			case "archived":
+			case "resumable":
 				sortOrder = 6
+			case "archived":
+				sortOrder = 7
 			}
 		}
 
@@ -3662,6 +3720,8 @@ func (m model) renderColumns(num, name, status, branch, project, msgs, tokens, m
 			statusCell = stResumable.Render(statusCell)
 		case "archived":
 			statusCell = stArchived.Render(statusCell)
+		case "background":
+			statusCell = stBackground.Render(statusCell)
 		case "waiting":
 			statusCell = stWaiting.Render(statusCell)
 		case "processing":
@@ -4073,6 +4133,14 @@ func main() {
 	// On startup, scan existing tmux windows and recover or clean up orphans
 	// from previous c9s runs (e.g. after keep_alive detach or a crash).
 	if !demoMode {
+		// Sessions killed ungracefully (e.g. `q` tearing down the whole tmux
+		// server) never fire SessionEnd, so their state file's TmuxPane
+		// lingers. If the tmux server was later restarted, pane IDs reset and
+		// a stale file can collide with a brand-new pane -- purge anything
+		// old enough that it can't belong to the current tmux server.
+		if n := sessionstate.PurgeStale(staleStateAge); n > 0 {
+			debugLog("startup → purged %d stale session state files", n)
+		}
 		m.reconcileStartupWindows(sessions)
 	}
 	if demoMode {

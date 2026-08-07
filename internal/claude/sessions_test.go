@@ -439,6 +439,33 @@ func TestGetSupersededSessions(t *testing.T) {
 	}
 }
 
+func TestParseBackgroundAgentSessions(t *testing.T) {
+	data := []byte(`[
+		{"kind":"interactive","sessionId":"aaa-1"},
+		{"kind":"background","sessionId":"bbb-2"},
+		{"kind":"background","sessionId":"ccc-3"}
+	]`)
+
+	agents := parseBackgroundAgentSessions(data)
+
+	if agents["aaa-1"] {
+		t.Error("interactive session should not be marked as a background agent")
+	}
+	if !agents["bbb-2"] || !agents["ccc-3"] {
+		t.Error("background sessions should be marked as background agents")
+	}
+	if len(agents) != 2 {
+		t.Errorf("expected 2 background agents, got %d", len(agents))
+	}
+}
+
+func TestParseBackgroundAgentSessionsMalformed(t *testing.T) {
+	agents := parseBackgroundAgentSessions([]byte("not json"))
+	if len(agents) != 0 {
+		t.Errorf("expected empty map for malformed input, got %d entries", len(agents))
+	}
+}
+
 func TestStatusString(t *testing.T) {
 	tests := []struct {
 		s    Status
@@ -448,6 +475,7 @@ func TestStatusString(t *testing.T) {
 		{StatusResumable, "resumable"},
 		{StatusIdle, "idle"},
 		{StatusActive, "active"},
+		{StatusBackground, "background"},
 	}
 	for _, tt := range tests {
 		if got := tt.s.String(); got != tt.want {

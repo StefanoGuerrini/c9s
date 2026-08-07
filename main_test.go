@@ -4,12 +4,47 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stefanoguerrini/c9s/internal/claude"
 	"github.com/stefanoguerrini/c9s/internal/tmux"
 )
+
+func TestOpenSession_BackgroundAgentOpensPicker(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+
+	m := model{
+		insideTmux:       true,
+		managedWindows:   make(map[string]managedWindow),
+		replacedSessions: make(map[string]bool),
+		cursor:           0,
+		sessions: []claude.SessionInfo{
+			{SessionID: "bcd1234-a", Status: claude.StatusBackground, ProjectPath: "/home/user/project"},
+		},
+	}
+	items := []displayItem{{session: m.sessions[0]}}
+
+	result, _ := m.openSession(items)
+	rm := result.(model)
+
+	if len(rm.managedWindows) != 1 {
+		t.Fatalf("expected exactly one managed window, got %d", len(rm.managedWindows))
+	}
+	if _, ok := rm.managedWindows["bcd1234-a"]; ok {
+		t.Error("must not track the window under the background session's own id -- we don't know which id the user will land on")
+	}
+	for key, mw := range rm.managedWindows {
+		if !strings.HasPrefix(key, "new-") {
+			t.Errorf("expected a tmpKey (new-*), got %q", key)
+		}
+		if mw.project != "/home/user/project" {
+			t.Errorf("project = %q, want /home/user/project", mw.project)
+		}
+	}
+}
 
 func TestReconcileWindows_NewSession(t *testing.T) {
 	tmux.DryRun = true
@@ -127,6 +162,7 @@ func TestReconcileWindows_Fork(t *testing.T) {
 			ProjectPath: "/home/user/project",
 			Dir:         tmpDir,
 			FileMtime:   time.Now().Add(-5 * time.Minute), // stale
+			Status:      claude.StatusResumable,            // still on disk, not archived
 		},
 		{
 			SessionID:   "forked-session-id",
@@ -297,6 +333,58 @@ func TestReconcileWindows_SupersededRekeys(t *testing.T) {
 	}
 }
 
+func TestReconcileWindows_SkipsHideAndRenameWhenOldArchived(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+	tmpDir := t.TempDir()
+
+	// Compaction: old-id's JSONL is gone (archived). The re-key must still
+	// happen (the window needs to track the session that's actually running
+	// in it now), but there's nothing to hide and no title worth carrying
+	// forward -- mirrors the pane-anchor path's compaction guard.
+	forkedJSONL := `{"forkedFrom":{"sessionId":"old-id"}}` + "\n"
+	os.WriteFile(filepath.Join(tmpDir, "new-id.jsonl"), []byte(forkedJSONL), 0644)
+
+	m := &model{
+		replacedSessions: make(map[string]bool),
+		managedWindows: map[string]managedWindow{
+			"old-id": {windowID: "@5", sessionID: "old-id", project: "/home/user/project"},
+		},
+	}
+
+	now := time.Now()
+	sessions := []claude.SessionInfo{
+		{
+			SessionID:   "old-id",
+			ProjectPath: "/home/user/project",
+			Dir:         tmpDir,
+			Status:      claude.StatusArchived,
+			CustomTitle: "Old work",
+		},
+		{
+			SessionID:   "new-id",
+			ProjectPath: "/home/user/project",
+			Dir:         tmpDir,
+			FileMtime:   now.Add(-2 * time.Second),
+		},
+	}
+	for i := range sessions {
+		claude.ReadTokenUsageForTest(&sessions[i])
+	}
+
+	m.reconcileWindows(sessions)
+
+	if _, ok := m.managedWindows["new-id"]; !ok {
+		t.Error("window should still be re-keyed to new-id")
+	}
+	if m.replacedSessions["old-id"] {
+		t.Error("archived old session should not be hidden")
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "sessions-index.json")); err == nil {
+		t.Error("new-id should not have been renamed on a compaction transition")
+	}
+}
+
 func TestApplyPaneAnchorRetag_ReassignsToRealSession(t *testing.T) {
 	tmux.DryRun = true
 	t.Cleanup(func() { tmux.DryRun = false })
@@ -451,6 +539,78 @@ func TestApplyClearOrForkEffects_ForkKeepsOldVisibleAndSuffixesTitle(t *testing.
 	data, _ := os.ReadFile(filepath.Join(dir, "sessions-index.json"))
 	if !bytes.Contains(data, []byte(`"customTitle": "Investigating fork"`)) {
 		t.Errorf("B should be titled '<A> fork', got: %s", data)
+	}
+}
+
+func TestApplyClearOrForkEffects_SkipsWhenOldArchived(t *testing.T) {
+	tmux.DryRun = true
+	t.Cleanup(func() { tmux.DryRun = false })
+	dir := t.TempDir()
+
+	m := &model{replacedSessions: map[string]bool{}}
+	events := []retagEvent{{oldKey: "A", newID: "B", windowID: "@W", project: "/proj"}}
+	// A's JSONL is gone (compaction) -- nothing to hide, no title to carry.
+	sessions := []claude.SessionInfo{
+		{SessionID: "A", CustomTitle: "Investigating flaky test", Status: claude.StatusArchived, Dir: dir, ProjectPath: "/proj"},
+		{SessionID: "B", Status: claude.StatusActive, Dir: dir, ProjectPath: "/proj"},
+	}
+
+	if m.applyClearOrForkEffects(events, sessions) {
+		t.Error("compaction path should report no change")
+	}
+	if m.replacedSessions["A"] {
+		t.Error("archived old session should not be hidden")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sessions-index.json")); err == nil {
+		t.Error("B should not have been renamed -- no sessions-index.json should have been written")
+	}
+}
+
+func TestClearOrForkOutcome(t *testing.T) {
+	old := &claude.SessionInfo{SessionID: "A", CustomTitle: "Investigating flaky test"}
+
+	tests := []struct {
+		name       string
+		newSession *claude.SessionInfo
+		wantHide   bool
+		wantTitle  string
+	}{
+		{
+			name:       "clear: blank new session inherits old title as-is",
+			newSession: &claude.SessionInfo{SessionID: "B"},
+			wantHide:   true,
+			wantTitle:  "Investigating flaky test",
+		},
+		{
+			name:       "fork: new session with content gets suffixed title, stays visible",
+			newSession: &claude.SessionInfo{SessionID: "B", FirstPrompt: "explore alternate path"},
+			wantHide:   false,
+			wantTitle:  "Investigating flaky test fork",
+		},
+		{
+			name:       "new session already has its own title: nothing to write",
+			newSession: &claude.SessionInfo{SessionID: "B", CustomTitle: "Already named"},
+			wantHide:   true,
+			wantTitle:  "",
+		},
+		{
+			name:       "new session not seen yet: hide-or-not still decided, no title (nothing to rename)",
+			newSession: nil,
+			wantHide:   true,
+			wantTitle:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hide, title := clearOrForkOutcome(old, tt.newSession)
+			if hide != tt.wantHide {
+				t.Errorf("hide = %v, want %v", hide, tt.wantHide)
+			}
+			if title != tt.wantTitle {
+				t.Errorf("newTitle = %q, want %q", title, tt.wantTitle)
+			}
+		})
 	}
 }
 

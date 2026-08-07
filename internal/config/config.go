@@ -64,10 +64,11 @@ type Colors struct {
 	Error       string `json:"error"`        // error messages (default: "9")
 
 	// Session statuses
-	Active    string `json:"active"`    // active session (default: "14")
-	Idle      string `json:"idle"`      // idle session (default: "13")
-	Resumable string `json:"resumable"` // resumable session (default: "10")
-	Archived  string `json:"archived"`  // archived session (default: "240")
+	Active     string `json:"active"`     // active session (default: "14")
+	Idle       string `json:"idle"`       // idle session (default: "13")
+	Resumable  string `json:"resumable"`  // resumable session (default: "10")
+	Archived   string `json:"archived"`   // archived session (default: "240")
+	Background string `json:"background"` // claimed by a background agent (default: "212")
 
 	// Pane statuses
 	Processing string `json:"processing"` // processing (default: "14")
@@ -118,10 +119,11 @@ func Default() Config {
 			Info:        "10",
 			Error:       "9",
 
-			Active:    "14",
-			Idle:      "13",
-			Resumable: "10",
-			Archived:  "240",
+			Active:     "14",
+			Idle:       "13",
+			Resumable:  "10",
+			Archived:   "240",
+			Background: "212",
 
 			Processing: "14",
 			Waiting:    "11",
@@ -343,6 +345,9 @@ func EditableFields() []Field {
 		{Section: "Theme", Label: "Archived", Key: "archived",
 			Get: func(c Config) string { return c.Colors.Archived },
 			Set: func(c *Config, v string) { c.Colors.Archived = v }},
+		{Section: "Theme", Label: "Background", Key: "background",
+			Get: func(c Config) string { return c.Colors.Background },
+			Set: func(c *Config, v string) { c.Colors.Background = v }},
 		{Section: "Theme", Label: "Processing", Key: "processing",
 			Get: func(c Config) string { return c.Colors.Processing },
 			Set: func(c *Config, v string) { c.Colors.Processing = v }},

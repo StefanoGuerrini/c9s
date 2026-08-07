@@ -62,6 +62,7 @@ c9s/
 - **Custom prefix**: c9s disables the tmux prefix in its session to avoid interfering with user's tmux config.
 - **Hybrid status detection**: File mtime for processing state, pane content capture for done vs waiting distinction.
 - **Auto-bootstrap**: Running `./c9s` outside tmux auto-creates a `c9s` tmux session and attaches.
+- **State-file lifecycle**: `~/.c9s/state/<session>.json` records the tmux pane a session last hooked from (`TmuxPane`) -- the pane-anchor mechanism that survives `/resume`, `/clear`, and `/fork`. tmux reissues pane IDs from zero on every server restart, so a leftover file from an ungracefully-killed session (`q`, a force-closed window, a crash) can otherwise resurrect and claim a pane that now belongs to something else. Three layers close that gap: `q` and window-close paths call `sessionstate.Remove` proactively; `PurgeStale` sweeps anything untouched for 24h at startup; `PaneSessionMap` itself ignores any claim older than `PaneStaleAfter` (6h) regardless. A live session's hooks refresh far more often than either threshold, so none of this affects a genuinely active pane.
 
 ### Session status model
 
@@ -71,6 +72,7 @@ c9s/
 | `idle` | claude process running (ps/lsof) | Process alive but not recent |
 | `resumable` | JSONL file exists on disk | Can be resumed with `--resume` |
 | `archived` | No JSONL file | Only in history, not on disk |
+| `background` | Session ID in `claude agents --json` (kind `background`) | Claimed by a background agent; `--resume` would fail, so Enter opens the `claude agents` picker instead |
 
 For managed windows (opened via c9s), additional pane statuses:
 
